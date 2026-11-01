@@ -521,15 +521,18 @@ export class VideoReaderWorld implements World {
           tone: 'plain',
         },
       ],
-      panels: [
-        {
-          id: 'media',
-          title: en ? 'Media & budget' : '媒体与预算',
-          description: en
-            ? 'What is cached on disk and what has been spent today. Files are evicted by least-recent use.'
-            : '本地缓存了什么、今天花了多少。下载的片子按最近使用淘汰，不会无限增长。',
-        },
-      ],
+      /**
+       * **不声明 `panels`。**
+       *
+       * 自定义面板要求包里有前端构建产物 `dist/webui.js`（由 `cortico.webUiClient` 指过去），
+       * 否则页签会直接报「缺少面板构建产物」—— 实测就是这么炸的：
+       * 一个只有 title/description、没有 getMethods 的 panel，用户点进去只看到红字。
+       *
+       * 而本 World 要显示的东西（用量、缓存占用、清理）**Core 的内置渲染已经全覆盖**：
+       * `badges` 显示用量，`storage` 显示体积并可清除，`config` 自动生成表单，
+       * `promptDocs` 渲染环境说明。多写一个面板等于多养一份要构建的前端产物，
+       * 换来的只是把这几行数字换个地方摆 —— 不值得。
+       */
       config: [VIDEO_READER_CONFIG_GROUP],
       promptDocs: [
         {
@@ -572,6 +575,30 @@ export class VideoReaderWorld implements World {
               : `已清掉 ${(freed / 1048576).toFixed(1)} MB；下次读会重新下载。`;
           },
         },
+        {
+          // 字幕单独一项：它是**再拿一次就免费的**东西（B站字幕轨），但删掉之后
+          // 同一条视频会退回"没有台词"，所以值得单独标出来好让人知道它在哪。
+          key: 'transcripts',
+          label: en ? 'Saved subtitle tracks' : '已保存的字幕轨',
+          kind: 'disk',
+          location: join(this.ctx.dataDir, 'transcripts'),
+          note: en
+            ? 'One JSON per video part, taken from the site subtitle track. Deleting one only means it is fetched again.'
+            : '每条视频分P 一个 JSON，取自 B站字幕轨。删掉只意味着下次读会重新取一遍。',
+          stat: () => {
+            const dir = join(this.ctx.dataDir, 'transcripts');
+            const n = fileCount(dir);
+            return n === 0
+              ? (en ? 'none yet' : '还没有')
+              : en ? `${n} file(s), ${(dirSize(dir) / 1048576).toFixed(1)} MB` : `${n} 个，共 ${(dirSize(dir) / 1048576).toFixed(1)} MB`;
+          },
+          clear: async () => {
+            const dir = join(this.ctx.dataDir, 'transcripts');
+            const n = fileCount(dir);
+            rmSync(dir, { recursive: true, force: true });
+            return en ? `Removed ${n} file(s).` : `已删掉 ${n} 个字幕文件。`;
+          },
+        },
       ],
     };
   }
@@ -589,6 +616,19 @@ export class VideoReaderWorld implements World {
 }
 
 /* ------------------------------------------------------------------ 工具 */
+
+/**
+ * 目录里有多少个文件。**不递归**：字幕目录是平铺的（每条视频分P 一个 JSON），
+ * 递归只会让一次"看看有几个"变成一次遍历。读不了就报 0 —— 面板显示少一个数，
+ * 比面板整个崩掉好。
+ */
+function fileCount(dir: string): number {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).length;
+  } catch {
+    return 0;
+  }
+}
 
 /** 目录体积，**有上限地**走：只为了在面板上显示一个数量级，不值得遍历几万个文件。 */
 function dirSize(dir: string, budget = 4000): number {
