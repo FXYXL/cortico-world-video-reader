@@ -1,0 +1,23 @@
+# 本地凭据：**绝对不能发布到 npm**
+.npmrc
+.env
+cookies.txt
+*.pem
+
+# 桌宠只需要 src/ + describe.json；脚本与测试随包发布（README 的「开发」一节引用了它们）
+.gitignore
+.gitattributes
+*.tgz
+*.log
+data/
+cache/
+media/
+state/
+transcripts/
+node_modules/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,10 @@
+# 统一按 LF 存进仓库。仓库里既有新写的 TS，也有从上游移植的 JS，
+# 不锁住的话 Windows 上的 core.autocrlf 会让每一次改动都显示成整文件重写。
+* text=auto eol=lf
+
+# 图片是二进制，别做任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

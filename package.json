@@ -1,0 +1,71 @@
+{
+  "name": "cortico-world-video-reader",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "视频读懂：把一段视频压成带时间戳的分镜图，附逐格字幕与音频波形，让看不到画面的模型也能引用「第几分钟发生了什么」。B站链接直接读，与社交视窗共用登录，只读不发。",
+  "license": "Apache-2.0",
+  "author": "FXYXL",
+  "homepage": "https://github.com/FXYXL/cortico-world-video-reader#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FXYXL/cortico-world-video-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FXYXL/cortico-world-video-reader/issues"
+  },
+  "engines": {
+    "node": ">=22.16"
+  },
+  "main": "./src/index.ts",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "coopanion",
+    "desktop-pet",
+    "video",
+    "storyboard",
+    "bilibili",
+    "subtitle",
+    "ffmpeg",
+    "multimodal"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "视频读懂",
+    "describe": "describe.json",
+    "tags": [
+      "video",
+      "internet",
+      "external-setup"
+    ],
+    "locales": {
+      "zh": {
+        "displayName": "视频读懂",
+        "description": "把一段视频压成带时间戳的分镜图，附逐格字幕与音频波形。B站链接直接读，与社交视窗共用登录，只读不发。"
+      },
+      "en": {
+        "displayName": "Video Reader",
+        "description": "Compresses a video into a timestamped storyboard image with per-cell subtitles and an audio strip. Reads Bilibili links directly, shares the Social Window login, and never posts."
+      }
+    }
+  },
+  "files": [
+    "src",
+    "scripts",
+    "test",
+    "describe.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "smoke": "node test/smoke.test.mjs",
+    "smoke:world": "node test/world.local.ts",
+    "smoke:bridge": "node test/bridge.smoke.ts",
+    "describe": "node scripts/export-describe.mjs",
+    "check": "node test/check-describe.mjs"
+  },
+  "dependencies": {}
+}

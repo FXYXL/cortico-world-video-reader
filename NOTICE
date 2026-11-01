@@ -1,0 +1,54 @@
+# NOTICE
+
+## 本包
+
+Copyright 2026 FXYXL
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+## 上游：`src/engine/storyboard/` 的来源
+
+本包里 `src/engine/storyboard/` 下的 42 个模块**移植自**：
+
+> **dsh-video-storyboard** — https://github.com/SAOS-3624/dsh-video-storyboard
+> Copyright 2026 SAOS-3624，Apache License 2.0
+
+移植的是**视频理解引擎**：切点扫描、密度分档、行打包排布、锐度选帧、拼图与音频条带、
+清单渲染、缓存与媒体淘汰。上游是给 DeepSeek Harness 写的插件；本包把它的
+注册层换成了 Coopanion 的 World 契约，**引擎内部的判定逻辑一行未改**。
+
+改动只有两类，都在引擎之外或边界上：
+
+| 位置 | 改动 |
+|---|---|
+| `src/engine/load.js` | 新增：把 Coopanion 配置映射成引擎读的环境变量，并**延迟加载**引擎（上游在插件 `apply()` 里同步注册，Coopanion 的 World 不能那样做） |
+| 调用参数 | 由 `src/world.ts` 显式传入 `ffmpegPath` / `ffprobePath` / 数据目录，不再依赖进程环境 |
+
+上游的 `src/index.js`（DSH 工具注册）与 `src/tools/shared.js`（DSH 附件提交）**没有移植** ——
+Coopanion 的图片交付走 `ToolOutcome.blobs`，比上游那套 `attachments.saveImage` 简单一层。
+
+## 第三方
+
+- **ffmpeg / ffprobe**：不随本包分发，由使用者自行安装。本包只调用。
+- **B站接口**：本包通过公开的网页接口读取视频元信息、取流地址与字幕轨。
+  这是非官方接口，平台变动可能使其失效。使用者需自行确认对目标内容的处理权限，并遵守平台条款与当地法律。
+- 本包**不**下载、不托管、不转发任何视频内容到别处：落盘的副本只在本机，
+  有容量上限并按最近使用淘汰，随时可在扩展配置页清掉。
+- 本包**不**提供付费内容的访问、不绕过 DRM、不做地区限制规避、不批量抓取。
+  一次调用只处理一条链接；平台返回限流（412/429/567）时报错并停止。
+
+## 与「社交视窗」的关系
+
+本包只**读**社交视窗（`cortico-world-social-media`）在部署 `.env` 里保存的 B站登录
+（默认 `SOCIALMEDIA_BILIBILI_COOKIE`），**从不写入**，也不读写它的任何记录、缓存或账本。
+两个扩展可以各自独立安装、独立卸载。
