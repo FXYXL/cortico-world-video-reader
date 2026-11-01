@@ -25,14 +25,16 @@ limitations under the License.
 
 移植的是**视频理解引擎**：切点扫描、密度分档、行打包排布、锐度选帧、拼图与音频条带、
 清单渲染、缓存与媒体淘汰。上游是给 DeepSeek Harness 写的插件；本包把它的
-注册层换成了 Coopanion 的 World 契约，**引擎内部的判定逻辑一行未改**。
+注册层换成了 Coopanion 的 World 契约，**引擎的判定逻辑（切在哪、格子多大、排几张、选哪一帧）
+一行未改**。
 
-改动只有两类，都在引擎之外或边界上：
+改动都在引擎之外、边界上，或删掉一句不成立的提示：
 
 | 位置 | 改动 |
 |---|---|
 | `src/engine/load.js` | 新增：把 Coopanion 配置映射成引擎读的环境变量，并**延迟加载**引擎（上游在插件 `apply()` 里同步注册，Coopanion 的 World 不能那样做） |
 | 调用参数 | 由 `src/world.ts` 显式传入 `ffmpegPath` / `ffprobePath` / 数据目录，不再依赖进程环境 |
+| `src/engine/storyboard/format.js` | **删掉一行**：`per-cell times for verification: <name>.evidence.json`。那是上游 CLI 落盘时写的 sidecar 文件名，本包不落盘分镜，留着会让模型去找一个不存在的文件。每格时间本来就已经逐行列在清单里。 |
 
 上游的 `src/index.js`（DSH 工具注册）与 `src/tools/shared.js`（DSH 附件提交）**没有移植** ——
 Coopanion 的图片交付走 `ToolOutcome.blobs`，比上游那套 `attachments.saveImage` 简单一层。

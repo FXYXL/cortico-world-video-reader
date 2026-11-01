@@ -43,8 +43,18 @@ const isBili = (v: string) => /bilibili\.com/i.test(v) || /^(BV[0-9A-Za-z]{10}|a
 /** 体积显示：小数值保留一位，免得 0.2MB 显示成 "0MB"。 */
 const mb = (n: number) => (n >= 10 ? n.toFixed(0) : n.toFixed(1));
 
-/** 长于这个秒数、又没给 from/to/segment 时，自动按窗口读第一段 —— 免得一上手就烧完整片。 */
-const LONG_VIDEO_SEC = 1200;
+/**
+ * 长于这个秒数、又没给 from/to/segment 时，自动按窗口读第一段 —— 免得一上手就烧完整片。
+ *
+ * **必须和 probe 里给建议的阈值一致**（`probe-text.ts` 与引擎 `format.js` 都用 8 分钟）。
+ * 不一致的代价很具体：一条 13 分钟的片子，probe 说"分 3 段读"，模型照做调了
+ * `video_storyboard({ video })`（不给 from），护栏却因为没到 20 分钟而不触发，
+ * 于是出了一张盖住全片的总览 —— 8 张图 3072 token，剧透，而且每格更小。
+ * 实测踩过（BV1L7nz6oEAN，13 分钟，8 张图）。
+ *
+ * 经验阈值：4 张图 = 1536 token，已经比"分段第一张 384"贵 4 倍。8 分钟是分界。
+ */
+const LONG_VIDEO_SEC = 480;
 
 export class VideoReaderWorld implements World {
   readonly id = VIDEO_READER_ID;
@@ -282,6 +292,7 @@ export class VideoReaderWorld implements World {
     });
 
     return this.finish(engine, result, src, {
+      kind: 'board',
       detail: options.detail,
       cellRange: Array.isArray(args.cellRange) ? (args.cellRange as number[]) : null,
       textOnly,
@@ -302,7 +313,10 @@ export class VideoReaderWorld implements World {
 
     this.ledger.assertAllowed(Number(cfg.maxDailyCalls) || 0, Number(cfg.maxDeliveredMB) || 0);
 
-    const src = await this.prepare(args, engine, { wantFrameSource: true }, callCtx);
+    // 回原始流取高清帧很慢（每次 seek 走 HTTP，实测 4 帧约 40 秒），
+    // 而本地 480p 副本对 4 格仍有 2 倍超采样 —— 所以这件事可选，默认关。
+    const fromStream = cfg.zoomFromStream !== false;
+    const src = await this.prepare(args, engine, { wantFrameSource: fromStream }, callCtx);
 
     let from = args.from;
     let to = args.to;
@@ -346,6 +360,7 @@ export class VideoReaderWorld implements World {
     });
 
     return this.finish(engine, result, src, {
+      kind: 'zoom',
       detail: options.detail,
       cellRange: null,
       textOnly: false,
@@ -401,13 +416,28 @@ export class VideoReaderWorld implements World {
     engine: Engine,
     result: any,
     src: PreparedSource,
-    o: { detail: string; cellRange: number[] | null; textOnly: boolean; maxDeliveredMB: number },
+    o: {
+      kind: 'board' | 'zoom';
+      detail: string;
+      cellRange: number[] | null;
+      textOnly: boolean;
+      maxDeliveredMB: number;
+    },
   ): Promise<ToolOutcome> {
     const head: string[] = [];
     head.push(
       `[video] ${src.title} · ${src.identity} · ${clock(await this.durationOf(src, engine))}`,
     );
-    if (src.play) {
+    if (o.kind === 'zoom') {
+      // zoom 的帧可能来自两个地方，结果里必须说清是哪一个 ——
+      // 它决定了"画面上的小字能不能读"这件事到底成不成立。
+      head.push(
+        src.frameSource
+          ? `[frames] 按帧读原始流 ${src.frameSource.height}p（没有下载）；本地 ${src.play?.height ?? '?'}p 副本只作回落`
+          : `[frames] 从本地 ${src.play?.height ?? '?'}p 副本读（配置里关了"回原始流取帧"）` +
+            '；要读画面上的小字，请主人在配置页打开它。',
+      );
+    } else if (src.play) {
       head.push(
         `[resolution] got ${src.play.height ?? '?'}p (asked ${src.play.requestedHeight}p)` +
           (src.degraded.length ? ` — ${src.degraded.join('; ')}` : ''),

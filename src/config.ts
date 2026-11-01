@@ -24,6 +24,16 @@ export interface VideoReaderConfigSection extends WorldSection {
   scanHeight: number;
   /** 放大重看时的清晰度上限（不落盘，按帧读原始流）。 */
   zoomHeight: number;
+  /**
+   * 放大重看时是否回原始流取帧。
+   *
+   * `true`：按帧读 zoomHeight 那一档，最清楚，但**每次 seek 都要走 HTTP** ——
+   * 实测一条 33 秒视频的 1080P 取 4 帧要 40 秒左右。
+   * `false`（默认）：直接读本地那份扫描副本（480p）。**快两个数量级**（亚秒级），
+   * 而扫描副本宽 854（480p），对 4 格（每格 400×227）仍有 2 倍超采样 —— 看人脸、看构图够用。
+   * 什么时候该开：要读画面上的小字（UI、书名、烧进画面的字幕）时。
+   */
+  zoomFromStream: boolean;
   /** 单张分镜图的像素预算，上限 640000 = 800x800（宿主视觉上限）。 */
   budget: number;
   /** 单次最多返回几张图。0 = 不限（排布器说了算）。 */
@@ -57,11 +67,14 @@ export const VIDEO_READER_DEFAULTS: VideoReaderConfigSection = {
   enabled: true,
   scanHeight: 480,
   zoomHeight: 1080,
+  // 实测：回原始流取 4 帧要 40 秒，而本地 480p 副本对 4 格仍有 2 倍超采样。
+  // 所以默认快，要读画面小字时在配置页打开。
+  zoomFromStream: false,
   budget: 640_000,
-  maxSheets: 8,
+  maxSheets: 4,
   maxFrames: 0,
   detail: 'med',
-  strategy: 'standard',
+  strategy: 'compact',
   segment: 300,
   mediaMaxMB: 300,
   maxDailyCalls: 60,
@@ -128,6 +141,14 @@ export const VIDEO_READER_CONFIG_GROUP: ConfigGroup = {
         description: 'video_zoom 回原始流取帧用的档位，不落盘。1080 起步。',
         'x-hot': true,
       },
+      'worlds.video-reader.zoomFromStream': {
+        type: 'boolean',
+        title: '放大重看时回原始流取高清帧',
+        description:
+          '打开后 video_zoom 按帧读原始流（最清楚），但每次 seek 都走 HTTP —— 33 秒视频取 4 帧约 40 秒。' +
+          '关掉则直接读本地扫描副本（480p），亚秒级完成，看人脸/构图够用。要读画面上的小字时再打开。',
+        'x-hot': true,
+      },
       'worlds.video-reader.budget': {
         type: 'integer',
         title: '单图像素预算',
@@ -148,7 +169,8 @@ export const VIDEO_READER_CONFIG_GROUP: ConfigGroup = {
         title: '尺寸策略',
         enum: ['full', 'standard', 'compact', 'skim', 'brief'],
         description:
-          'standard 默认。每往下一档，每格小一档、张数少一点：full 最大、brief 最省（只够看出换了镜头）。',
+          'compact 默认（实测：同一窗口内它比 standard 多出 75% 的格，张数不变）。' +
+          '每往下一档，每格小一档、张数少一点：full 最大、brief 最省（只够看出换了镜头）。',
         'x-hot': true,
       },
       'worlds.video-reader.maxSheets': {
@@ -156,7 +178,9 @@ export const VIDEO_READER_CONFIG_GROUP: ConfigGroup = {
         title: '单次最多几张图',
         minimum: 0,
         maximum: 64,
-        description: '0 = 不限（排布器说了算）。长片分段读时每段通常只有 1-2 张。',
+        description:
+          '4（默认）= 一段最长 1536 token。**0 非常危险**：300 秒的正常剪辑窗口实测能出 17 张 = 6528 token，' +
+          '6 倍价钱换来的信息量打不过 4 张。只有"先确认这是什么片"时才临时调到 0。',
         'x-hot': true,
       },
       'worlds.video-reader.maxFrames': {

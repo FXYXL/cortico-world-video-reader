@@ -766,7 +766,10 @@ export function formatManifest(result, {
   // 追问时不必重新出图 —— 这张图就在上下文里，按格号引用即可（每省一次就是 384 token）。
   // 两行共约 100 字符，换掉一次重读的 384 token —— 只要追问一次就赚回来。
   lines.push('sheet already in context: cite cells by number; video_zoom only for a narrower window.');
-  lines.push('per-cell times for verification: <name>.evidence.json');
+  // **上游这里还有一行**：`per-cell times for verification: <name>.evidence.json`。
+  // 那是 CLI 落盘路径的产物（saveStoryboards 会写一个同名 sidecar），
+  // 而本包不落盘分镜 —— 留着会让模型去找一个不存在的文件。
+  // 每格时间已经在上面逐行列出来了，这一行是纯冗余 + 误导，所以删掉。
   return lines.join('\n');
 }
 
