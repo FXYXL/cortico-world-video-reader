@@ -380,6 +380,13 @@ export class BilibiliClient {
 
   /**
    * 把选中的轨道落盘成一份 mp4（视频+音频 `-c copy` 合流）。
+   *
+   * **视频轨必须沿用在 playurl() 里挑过的那一档，不能在这里重新 pickBest()。**
+   * 接口一次返回 12 条 DASH 轨（360p 到 1080P+），重新挑会拿到最高的那条：
+   * 实测一条 33 秒视频，扫描只要 480p，却下了 1080P 的 4.2Mbps 轨，
+   * **首次下载从 ~9 秒涨到 194 秒**，而画面像素一个都没多（扫描本来就会缩到 480p）。
+   * 所以：`info.height` 说了算。
+   *
    * 返回是否真的带了音轨，供上层在"没有声音"时区分原因。
    */
   async download(
@@ -388,7 +395,11 @@ export class BilibiliClient {
     ffmpeg: string,
     opts: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<{ hasAudio: boolean }> {
-    const video = pickBest(info.videos) ?? null;
+    // info.height 是 playurl 已经按请求档位过滤后的结果；null 表示源站连最低档都没给。
+    const videosAt = info.height === null
+      ? info.videos
+      : info.videos.filter((t) => (t.height ?? 0) <= info.height! + 1);
+    const video = pickBest(videosAt.length ? videosAt : info.videos) ?? null;
     const audio = pickBest(info.audios) ?? null;
     const args = ['-hide_banner', '-v', 'error', '-y'];
 
