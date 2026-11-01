@@ -43,7 +43,7 @@ try {
 
   const mod = await import(new URL('../src/index.ts', import.meta.url).href);
   const def = mod.default;
-  check('本包默认导出能被真框架的 describeTools 处理', Array.isArray(def.describe.tools) && def.describe.tools.length === 3,
+  check('本包默认导出能被真框架的 describeTools 处理', Array.isArray(def.describe.tools) && def.describe.tools.length === 5,
     def.describe.tools.map((t) => t.name).join(', '));
 
   const ctx = {
@@ -62,7 +62,7 @@ try {
   };
   const world = def.create(ctx);
   check('构造 World 不抛错', Boolean(world?.id));
-  check('tools() 返回三个工具', world.tools().length === 3);
+  check('tools() 返回五个工具', world.tools().length === 5);
   check('webUi() 能渲染', Boolean(world.webUi('zh')?.config?.length));
   check('envPromptVars() 三个变量', Object.keys(world.envPromptVars() ?? {}).length === 3);
 

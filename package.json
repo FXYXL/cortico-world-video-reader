@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-video-reader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "视频读懂：把一段视频压成带时间戳的分镜图，附逐格字幕与音频波形，让看不到画面的模型也能引用「第几分钟发生了什么」。B站链接直接读，与社交视窗共用登录，只读不发。",
   "license": "Apache-2.0",

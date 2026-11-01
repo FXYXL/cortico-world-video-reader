@@ -204,6 +204,98 @@ export const VIDEO_READER_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = 
       required: ['video'],
     },
   },
+  {
+    name: 'video_locate',
+    tags: ['read'],
+    description: [
+      'Find where a phrase is spoken in a video: returns timestamped transcript lines that match,',
+      'best first. **Text only** - no frame decode, no image, no image tokens.',
+      '',
+      'Use this when you know roughly what was said but not when ("where does it mention X").',
+      'Then pass the returned from/to window to video_zoom to see that moment.',
+      '',
+      'Needs a transcript. If video_storyboard already ran on this video, its subtitle track',
+      '(or the local speech recognition it ran) is reused. If not, it says so — it never re-decodes',
+      'the audio just to answer a text question.',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        video,
+        part: shared.part,
+        query: {
+          type: 'string',
+          description:
+            'The phrase to look for. Chinese and English both work; punctuation and spacing are ' +
+            'ignored. A longer quote matches better than a single character.',
+        },
+        from: { type: 'number', description: 'Only search after this second. Default: start of the video.' },
+        to: { type: 'number', description: 'Only search before this second. Default: end of the video.' },
+        max: {
+          type: 'number',
+          description: 'How many matches to return, 1-20. Default 5.',
+        },
+        transcriptFile: {
+          type: 'string',
+          description: 'Absolute path to your own SRT/JSON transcript, when the site has no subtitles and you already have one.',
+        },
+      },
+      required: ['video', 'query'],
+    },
+  },
+  {
+    name: 'video_subtitles',
+    tags: ['read'],
+    description: [
+      'Clip the burned-in subtitle band out of a video and stack all the strips into ONE tall image,',
+      'in time order — so you can read every on-screen line without a dozen zoom calls.',
+      '',
+      'Use this when the video has **hard-coded** subtitles on screen but no subtitle track and no',
+      'usable transcript (PV / music videos / lyrics / bilingual art titles). If the transcript is',
+      'available, video_locate is cheaper and gives text directly — try that first.',
+      '',
+      'Each strip is one moment stepSec apart, top to bottom. A blank strip means "no subtitle at',
+      'that moment", which is also information. The returned text lists the timestamp of every strip.',
+      '',
+      'Cost: one image. Strips are cut sequentially on purpose — parallel cropping on a memory-tight',
+      'machine is how 0xC000012D happens.',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        video,
+        part: shared.part,
+        from: { type: 'number', description: 'Window start in seconds (default 0).' },
+        to: { type: 'number', description: 'Window end in seconds. Omit for the whole video.' },
+        maxStrips: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 40,
+          description:
+            'Upper bound on strips, default 24. More strips = taller image = more lines caught, ' +
+            'but a long window gets coarser sampling.',
+        },
+        stepSec: {
+          type: 'number',
+          description:
+            'Target spacing in seconds (default 3). Actual spacing widens when the window is long ' +
+            'enough that maxStrips would be exceeded.',
+        },
+        band: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'Subtitle band as [y0, y1], fractions of frame height. Default 0.82-0.98 (bottom 16%). ' +
+            '**Tune it from what you actually SEE in the returned image**: text clipped at the top of ' +
+            'a strip means lower y0; mostly empty background means raise y0. Reference: single-line ' +
+            'bottom 0.86-0.98, bilingual bottom 0.82-0.98, top caption bar 0.02-0.14, centered lyric 0.40-0.60.',
+        },
+      },
+      required: ['video'],
+    },
+  },
 ];
 
 /** 给人看的一句话（describe.json 里的 summary 字段用它）。 */
@@ -213,11 +305,19 @@ export const TOOL_SUMMARY: Record<string, { zh: string; en: string }> = {
     en: 'Reads duration, parts, available resolutions and subtitle availability without downloading.',
   },
   video_storyboard: {
-    zh: '把一段视频压成带时间戳的分镜图：每格一个镜头，附逐格字幕与底部音频波形。',
+    zh: '把一段视频压成带时间戳的分镜图：每格一个镜头，附逐格台词与底部音频波形。',
     en: 'Compresses a video into a timestamped storyboard: one frame per shot, per-cell subtitles and an audio strip.',
   },
   video_zoom: {
     zh: '对某一格或某一小段时间近距离重看，格子更大、字幕更清楚。',
     en: 'Re-reads one cell or a short window at higher per-cell resolution.',
+  },
+  video_locate: {
+    zh: '纯文本定位：那句话在第几分钟。不出图、不花图片 token。',
+    en: 'Text-only: where a phrase is spoken. No image, no image tokens.',
+  },
+  video_subtitles: {
+    zh: '把画面里烧死的字幕一条条裁下来拼成一张长图（PV、歌词、双语艺术字用）。',
+    en: 'Clips the burned-in subtitle band into one tall image (PV, lyrics, bilingual titles).',
   },
 };

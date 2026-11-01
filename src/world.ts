@@ -18,7 +18,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,10 +28,12 @@ import type { WorldContext } from 'cortico/world.ts';
 import { VIDEO_READER_CONFIG_GROUP, VIDEO_READER_ID, type VideoReaderConfigSection } from './config.ts';
 import { VIDEO_READER_TOOL_DECLS } from './tools.ts';
 import { applyEngineEnv, loadEngine, type Engine } from './engine/load.js';
-import { BiliError, BilibiliClient, type SubtitleInfo } from './bridge/bilibili.ts';
+import { BiliError, BilibiliClient, type BiliMeta, type SubtitleInfo } from './bridge/bilibili.ts';
 import { resolveSource, type PreparedSource } from './bridge/source.ts';
 import { UsageLedger } from './bridge/usage.ts';
 import { formatBiliProbe, formatLocalProbe, clock } from './bridge/probe-text.ts';
+import { loadTranscript } from './bridge/transcript.ts';
+import { resolveAsrConfig } from './bridge/asr.ts';
 
 const ENV_PROMPT_PATH = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
@@ -189,6 +191,8 @@ export class VideoReaderWorld implements World {
       video_probe: (a, c) => this.probe(a, c),
       video_storyboard: (a, c) => this.storyboard(a, c),
       video_zoom: (a, c) => this.zoom(a, c),
+      video_locate: (a, c) => this.locate(a, c),
+      video_subtitles: (a, c) => this.subtitles(a, c),
     };
     return VIDEO_READER_TOOL_DECLS.map((decl) => ({
       name: decl.name,
@@ -368,6 +372,168 @@ export class VideoReaderWorld implements World {
     });
   }
 
+  /* ------------------------------------------------------------ video_locate */
+
+  /**
+   * 纯文本定位。**不出图、不花图片额度**，所以它既不进 `maxDailyCalls` 台账，
+   * 也不受那个额度限制 —— 一个"问句话在第几分钟"的调用被额度挡住是荒唐的。
+   */
+  private async locate(args: Args, callCtx?: { signal?: AbortSignal }): Promise<ToolOutcome> {
+    const input = String(args.video ?? '').trim();
+    const query = String(args.query ?? '').trim();
+    if (!input) throw new Error('缺参数 video（B站编号/链接或本地绝对路径）。');
+    if (!query) throw new Error('缺参数 query：要查的那句话。');
+
+    // locate 只读磁盘上的台词，不解码也不联网 —— 所以先解析出 bvid/分P，
+    // 但不下载媒体（不调 resolveSource，那会触发下载）。
+    const engine = await this.engine();
+    const part = Number(args.part ?? 1) || 1;
+    let bvid: string | null = null;
+    let meta: BiliMeta | null = null;
+    if (isBili(input) || isHttp(input)) {
+      if (isHttp(input) && !isBili(input)) {
+        throw new BiliError('目前只支持 B站链接和本地文件。');
+      }
+      meta = await this.client().view(input, part, callCtx?.signal);
+      bvid = meta.bvid;
+    }
+
+    const loaded = bvid
+      ? loadTranscript(this.ctx.dataDir, bvid, part, args.transcriptFile as string | undefined)
+      : {
+        source: 'none' as const,
+        segments: [],
+        note: '本地文件没有已知的字幕位置；请调 video_storyboard（它会做语音识别并缓存台词）之后再 locate。',
+      };
+
+    if (loaded.segments.length === 0) {
+      return {
+        text: `[transcript] ${loaded.note}`,
+        failed: true,
+      };
+    }
+
+    const from = Number(args.from);
+    const to = Number(args.to);
+    const ranged = loaded.segments.filter(
+      (s) => (!Number.isFinite(from) || s.to > from) && (!Number.isFinite(to) || s.from < to),
+    );
+    const max = Math.min(20, Math.max(1, Math.round(Number(args.max) || 5)));
+    const matches = engine.matchSegments(ranged, query, { max }) as Array<{
+      from: number;
+      to: number;
+      text: string;
+      score: number;
+    }>;
+
+    const head = `[video] ${meta ? `${meta.title} · ${meta.bvid} p${part}` : input}`;
+    const tail = loaded.source === 'asr'
+      ? '[依据] 台词来自本地语音识别，专有名词可能错；引用前建议用 video_zoom 对一下画面。'
+      : '[依据] 台词来自站点字幕轨。';
+    return {
+      text: `${head}\n[transcript] ${loaded.note}\n\n${engine.formatMatches(query, matches, { total: ranged.length })}\n\n${tail}`,
+    };
+  }
+
+  /* ------------------------------------------------------------ video_subtitles */
+
+  /** 硬字幕裁带长图。**出一张图**，所以要过额度。 */
+  private async subtitles(args: Args, callCtx?: { signal?: AbortSignal }): Promise<ToolOutcome> {
+    const cfg = this.cfg();
+    const engine = await this.engine();
+    this.ledger.assertAllowed(Number(cfg.maxDailyCalls) || 0, Number(cfg.maxDeliveredMB) || 0);
+
+    const src = await this.prepare(args, engine, { wantFrameSource: false }, callCtx);
+    const part = Number(args.part ?? 1) || 1;
+
+    // **这个工具只对"烧进画面"的字幕有意义。**
+    //
+    // 实测踩过：一条有字幕轨（软字幕，播放器渲染）的番剧，拿去裁底部带，
+    // 裁出来的是脚和裙子 —— 因为画面里根本没有字。软字幕是另一回事，
+    // 请用 video_locate 或直接在 storyboard 的清单里读。
+    //
+    // 判据只看"站点有没有字幕轨"：有轨就不该来这里。真正烧死的字幕
+    // （PV / 歌词 / 双语艺术字）**没有**字幕轨，所以这个判据不会误伤它们。
+    const transcript = src.meta
+      ? loadTranscript(this.ctx.dataDir, src.meta.bvid, part, args.transcriptFile as string | undefined)
+      : null;
+    if (transcript && transcript.source === 'site-subtitle') {
+      throw new Error(
+        `这条视频有字幕轨（${transcript.segments.length} 句），那些字是**播放器渲染的软字幕**，` +
+          '不在画面像素里 —— 裁底部只会裁到画面本身。要读台词请用：\n' +
+          `  video_locate({ video: "${src.meta?.bvid}", query: "那句话" })   ← 纯文本，零图片 token\n` +
+          '或者直接看 video_storyboard 清单里逐格贴好的台词。\n' +
+          '（video_subtitles 只适合字幕**烧死**在画面里的片子：PV、歌词、双语艺术字，那种没有字幕轨。）',
+      );
+    }
+
+    // 有真实台词时间码就按它对齐（一条对应一句，省一半条数）；
+    // 没有就让引擎均匀抽样 —— 拿不可靠的时刻表去"精确"对齐只会越对越错。
+    let times: number[] | null = null;
+    if (transcript && transcript.source === 'asr' && transcript.segments.length) {
+      // ASR 的时间码**不能**用来对齐烧死字幕（实测：唱歌/纯音乐片上它漏掉大半，
+      // 越对越错）。这里只把它当"这条片子确实有台词"的信息，不对齐。
+      times = null;
+    }
+
+    const band = Array.isArray(args.band) && args.band.length === 2
+      ? (args.band as number[])
+      : engine.defaultBand;
+
+    const outPath = join(this.ctx.dataDir, 'state', 'subtitle-strip.png');
+    mkdirSync(join(this.ctx.dataDir, 'state'), { recursive: true });
+
+    this.ledger.countCall();
+    const { readFile } = await import('node:fs/promises');
+    const strip = await engine.buildSubtitleStrip({
+      input: src.localPath,
+      ffmpegPath: this.ffmpegPath(),
+      ffprobePath: this.ffprobePath(),
+      from: Number(args.from) || 0,
+      ...(Number(args.to) > 0 ? { to: Number(args.to) } : {}),
+      maxStrips: Math.min(40, Math.max(1, Math.round(Number(args.maxStrips) || 24))),
+      stepSec: Number(args.stepSec) > 0 ? Number(args.stepSec) : 3,
+      band,
+      out: outPath,
+      ...(times ? { times } : {}),
+    });
+
+    const png = await readFile(strip.out);
+    const bytes = png.byteLength;
+
+    const marks = strip.strips.map((s: { t: number }) => clock(s.t)).join(' ');
+    const head = [
+      `[video] ${src.title} · ${src.identity}`,
+      `[strips] ${strip.strips.length} 条 · 带区间 ${band[0].toFixed(2)}-${band[1].toFixed(2)}` +
+        `（${strip.bandSource === 'detected' ? '自动检测' : '默认底部带'}）`,
+      `[order] 从上到下依次是：${marks}`,
+      '[align] 按时间均匀抽样 —— 拿 ASR 的时间码去对齐烧死字幕会越对越错（唱歌/纯音乐片漏掉大半）。',
+    ];
+
+    if (Number(cfg.maxDeliveredMB) > 0 && this.ledger.deliveredMB + bytes / 1048576 > Number(cfg.maxDeliveredMB)) {
+      return {
+        text: `${head.join('\n')}\n\n[图片未附] 累计交付预算已用完（${mb(this.ledger.deliveredMB)}MB/${cfg.maxDeliveredMB}MB）。`,
+      };
+    }
+    this.ledger.countDelivered(bytes);
+
+    return {
+      text: `${head.join('\n')}\n\n[怎么读] 每一条就是某个时刻画面底部那一条字幕。空白条 = 那一刻屏幕上没有字幕（也是信息）。` +
+        `如果文字被裁掉了上半截，把 band 的 y0 调小；如果一条里大半是空画面，把 y0 调大。` +
+        '\n[依据] 这是**画面像素里**的字幕。如果每一条里都没有字，说明这条字幕是播放器渲染的软字幕、' +
+        '不在画面里 —— 那就该用 video_locate 或 storyboard 的台词，别再裁了。' +
+        (src.play ? `\n[resolution] 裁带用的是 ${src.play.height}p 副本。` : ''),
+      blobs: [
+        {
+          bytes: png,
+          mime: 'image/png',
+          name: 'subtitle-strip.png',
+          fallbackText: `烧死字幕长图 ${strip.strips.length} 条`,
+        },
+      ],
+    };
+  }
+
   /* ------------------------------------------------------------ 共用 */
 
   private async prepare(
@@ -392,6 +558,19 @@ export class VideoReaderWorld implements World {
       ...(typeof args.transcriptFile === 'string' && args.transcriptFile.trim()
         ? { transcriptFile: args.transcriptFile.trim() }
         : {}),
+      // **没有字幕轨时的兜底**。每次调用都重新解析一遍：配置是活引用，
+      // 主人刚把模型目录填好，下一次工具调用就该用上。
+      asr: resolveAsrConfig({
+        dataDir: this.ctx.dataDir,
+        mode: String(cfg.asrMode ?? 'auto'),
+        modelDir: String(cfg.asrModelDir ?? ''),
+        sherpaPath: String(cfg.asrSherpaPath ?? ''),
+        language: String(cfg.asrLanguage ?? 'auto'),
+        apiUrl: String(cfg.asrApiUrl ?? ''),
+        apiKey: String(cfg.asrApiKey ?? ''),
+        apiModel: String(cfg.asrApiModel ?? ''),
+      }),
+      asrSherpaPath: String(cfg.asrSherpaPath ?? ''),
     });
   }
 

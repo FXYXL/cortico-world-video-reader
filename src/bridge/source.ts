@@ -14,11 +14,12 @@
  * 于是容量淘汰、磁盘余量检查这些不用重写一份。
  */
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Engine } from '../engine/load.js';
 import { BiliError, BilibiliClient, type BiliMeta, type PlayInfo } from './bilibili.js';
+import { transcribe, type AsrConfig, type TranscriptSegment } from './asr.js';
 
 export interface FrameSource {
   uri: string;
@@ -62,8 +63,15 @@ export interface ResolveOptions {
   ffmpeg: string;
   ffprobe: string;
   signal?: AbortSignal;
-  /** 显式指定的转写文件，给了就跳过字幕接口。 */
+  /** 显式指定的转写文件，给了就跳过字幕接口，也跳过 ASR。 */
   transcriptFile?: string;
+  /**
+   * 没有字幕轨时用哪一路语音识别。`undefined` 或 `kind:'off'` = 不转写
+   * （结果里会说明原因，不会假装听过音频）。
+   */
+  asr?: AsrConfig;
+  /** 覆盖 `sherpa-onnx-node` 的解析路径。 */
+  asrSherpaPath?: string;
 }
 
 const isHttp = (v: string) => /^https?:\/\//i.test(v);
@@ -135,7 +143,7 @@ async function resolveBilibili(o: ResolveOptions, raw: string): Promise<Prepared
     /* 淘汰失败不该让这次读取失败 */
   }
 
-  const { file, note } = await ensureTranscript(o, meta);
+  const { file, note } = await ensureTranscript(o, meta, localPath);
 
   const frameSource = o.wantFrameSource
     ? await client.frameSource(meta, o.frameHeight, o.signal)
@@ -161,6 +169,7 @@ async function resolveBilibili(o: ResolveOptions, raw: string): Promise<Prepared
 async function ensureTranscript(
   o: ResolveOptions,
   meta: BiliMeta,
+  localPath: string,
 ): Promise<{ file: string | null; note: string }> {
   if (o.transcriptFile) {
     return existsSync(o.transcriptFile)
@@ -176,10 +185,18 @@ async function ensureTranscript(
   try {
     info = await o.client.subtitles(meta, o.signal);
   } catch (error) {
-    return { file: null, note: `字幕未取到：${(error as Error).message}` };
+    // 字幕接口挂了不代表没有台词：还有 ASR 这条路。
+    return await ensureAfterSubtitleMiss(o, meta, localPath, `字幕接口未响应：${(error as Error).message}`);
   }
   if (!info.available || !info.raw) {
-    return { file: null, note: `没有字幕：${info.reason ?? '未知原因'}` };
+    // **没有字幕轨 → 退回 ASR**。这是 P1 补的那条路：
+    // 没字幕的视频以前只能看画面，现在能读到说的话（前提是本机有模型）。
+    //
+    // `ensureAfterSubtitleMiss` **永远**返回一个对象（哪怕 file 为 null），
+    // 它的 note 才是"为什么没有台词"的权威说明 —— 外面再包一层
+    // `没有字幕：${info.reason}` 会把"跑了识别但没听到人话"抹成"没有字幕"，
+    // 正是那种"结果说不清为什么、用户以为是插件坏了"的毛病。
+    return await ensureAfterSubtitleMiss(o, meta, localPath, info.reason);
   }
   try {
     mkdirSync(dir, { recursive: true });
@@ -194,6 +211,107 @@ async function ensureTranscript(
   }
 }
 
+/* ------------------------------------------------------------------ ASR 兜底 */
+
+/**
+ * 没有字幕轨时的兜底：本地 ASR。
+ *
+ * **永远返回一个带 note 的结果**（file 可以是 null）—— 它的 note 是"为什么没有台词"
+ * 的唯一权威说明，调用方不要再包一层"没有字幕"。三种情况必须能被区分开：
+ *   1. 站点字幕：取不到（`siteReason` 里是站点的原话）
+ *   2. 识别跑了但没人说话 → "跑了 4 个切片，丢弃 4 条疑似音乐段幻觉"
+ *   3. 识别根本没法用（没模型 / 没装 sherpa）→ 给出怎么装
+ * 第三种以前会被静默成第一种，用户看到"没有字幕"却不知道插件到底试没试过。
+ */
+async function ensureAfterSubtitleMiss(
+  o: ResolveOptions,
+  meta: BiliMeta,
+  localPath: string,
+  siteReason = '',
+): Promise<{ file: string | null; note: string }> {
+  const cfg = o.asr;
+  // 站点的原话常自带句号（"这个视频没有字幕轨。"），再补一个就是 "。。"
+  const siteMissed = siteReason ? `站点这边：${siteReason.replace(/[。.]\s*$/, '')}。` : '';
+  if (!cfg || cfg.kind === 'off') {
+    // 说清"为什么没有台词"，而不是只说"没有"
+    return {
+      file: null,
+      note: `没有字幕轨。${siteMissed}${cfg?.reason ? `语音识别也没启用：${cfg.reason}` : '语音识别也没启用'}，所以没有台词。`,
+    };
+  }
+  if (!existsSync(localPath)) {
+    return {
+      file: null,
+      note: `没有字幕轨。${siteMissed}本地副本还没落盘，这次没法做语音识别，所以没有台词。`,
+    };
+  }
+
+  const dir = transcriptDir(o.dataDir);
+  const file = join(dir, `asr-${meta.bvid}-p${meta.part}.json`);
+  if (existsSync(file) && statSync(file).size > 8) {
+    try {
+      const cached = JSON.parse(readFileSync(file, 'utf8')) as { segments?: TranscriptSegment[]; engine?: string };
+      const n = cached.segments?.length ?? 0;
+      if (n > 0) {
+        return { file, note: `没有站点字幕，用的是本地语音识别（已缓存，${n} 句）。` };
+      }
+    } catch {
+      // 坏文件：重新转一遍
+    }
+  }
+
+  const duration = meta.partDuration || meta.duration || 0;
+  if (!duration) {
+    return { file: null, note: `没有字幕轨。${siteMissed}读不到时长，这次没法做语音识别，所以没有台词。` };
+  }
+
+  const result = await transcribe({
+    cfg,
+    file: localPath,
+    ffmpeg: o.ffmpeg,
+    dataDir: o.dataDir,
+    from: 0,
+    dur: duration,
+    sherpaPath: o.asrSherpaPath,
+  });
+
+  if (result.segments.length === 0) {
+    return {
+      file: null,
+      note:
+        `没有字幕轨。${siteMissed}语音识别跑了 ${result.chunks} 个切片（${result.seconds.toFixed(0)} 秒）但没听到人话（${result.engine}），` +
+        (result.dropped > 0 ? `丢弃了 ${result.dropped} 条疑似音乐段幻觉。` : '这一段可能没有人声。') +
+        '所以只能看画面 —— 不要据此认为这条视频没有内容，只是没有可读的台词。',
+    };
+  }
+
+  try {
+    mkdirSync(dir, { recursive: true });
+    // 存成引擎认得的 {body:[{from,to,content}]} —— 和 B站字幕同一个格式，
+    // 下游 transcript-file 不用区分这行字是站点给的还是自己转的。
+    writeFileSync(
+      file,
+      JSON.stringify({
+        source: 'asr',
+        engine: result.engine,
+        body: result.segments.map((s) => ({ from: s.from, to: s.to, content: s.text })),
+      }),
+      'utf8',
+    );
+    const chars = result.segments.reduce((n, s) => n + s.text.length, 0);
+    return {
+      file,
+      note:
+        `没有字幕轨。${siteMissed}用本地语音识别转写了 ${result.chunks} 个切片（${result.seconds.toFixed(0)} 秒，` +
+        `${chars} 字，${result.segments.length} 句）` +
+        (result.dropped > 0 ? `，丢弃 ${result.dropped} 条疑似音乐段幻觉` : '') +
+        '。引用前建议对画面核对专有名词。',
+    };
+  } catch (error) {
+    return { file: null, note: `语音识别成功但写入失败：${(error as Error).message}` };
+  }
+}
+
 /* ------------------------------------------------------------------ 本地 */
 
 async function resolveLocal(o: ResolveOptions, raw: string): Promise<PreparedSource> {
@@ -203,19 +321,69 @@ async function resolveLocal(o: ResolveOptions, raw: string): Promise<PreparedSou
   if (!st.isFile()) throw new BiliError(`不是文件：${path}`);
   if (st.size === 0) throw new BiliError(`文件是空的：${path}`);
 
-  const file = o.transcriptFile && existsSync(o.transcriptFile) ? o.transcriptFile : null;
-  return {
+  const explicit = o.transcriptFile && existsSync(o.transcriptFile) ? o.transcriptFile : null;
+  const local: PreparedSource = {
     kind: 'local',
     identity: path,
     title: path.split(/[\\/]/).pop() ?? path,
     localPath: path,
     meta: null,
     play: null,
-    transcriptFile: file,
-    transcriptNote: file ? `使用指定转写：${file}` : '本地文件没有字幕轨时不会自动转写（V1 未接 ASR）。',
+    transcriptFile: explicit,
+    transcriptNote: explicit ? `使用指定转写：${explicit}` : '',
     frameSource: null,
     downloaded: false,
     hasAudio: null,
     degraded: [],
   };
+  if (!explicit) {
+    // 本地文件没有"站点字幕"这个概念 —— 直接走语音识别（如果启用了）。
+    const cfg = o.asr;
+    if (cfg && cfg.kind !== 'off' && existsSync(local.localPath)) {
+      const info = await o.engine.probeVideo(local.localPath, { ffprobePath: o.ffprobe }).catch(() => null);
+      const duration = Number(info?.duration) || 0;
+      if (Number(info?.hasAudio) && duration > 0) {
+        const result = await transcribe({
+          cfg,
+          file: local.localPath,
+          ffmpeg: o.ffmpeg,
+          dataDir: o.dataDir,
+          from: 0,
+          dur: duration,
+          sherpaPath: o.asrSherpaPath,
+        });
+        if (result.segments.length > 0) {
+          const dir = transcriptDir(o.dataDir);
+          mkdirSync(dir, { recursive: true });
+          const f = join(dir, `asr-local-${st.size}-${Math.round(st.mtimeMs)}.json`);
+          writeFileSync(
+            f,
+            JSON.stringify({
+              source: 'asr',
+              engine: result.engine,
+              body: result.segments.map((s) => ({ from: s.from, to: s.to, content: s.text })),
+            }),
+            'utf8',
+          );
+          local.transcriptFile = f;
+          local.transcriptNote =
+            `本地文件没有字幕轨，用语音识别转写了 ${result.chunks} 个切片（${result.seconds.toFixed(0)} 秒，` +
+            `${result.segments.length} 句）` +
+            (result.dropped > 0 ? `，丢弃 ${result.dropped} 条疑似音乐段幻觉` : '') +
+            '。引用前建议对画面核对专有名词。';
+        } else {
+          local.transcriptNote = `本地文件没有字幕轨；语音识别跑完了但没识别出人话（${result.engine}），所以只能看画面。`;
+        }
+      } else {
+        local.transcriptNote = '这个文件没有音轨，所以没有台词；只能看画面。';
+      }
+    } else if (cfg && cfg.kind === 'off') {
+      local.transcriptNote = `没有字幕轨，${cfg.reason ?? '语音识别也没启用'}，所以没有台词。`;
+    } else {
+      local.transcriptNote = '本地文件没有字幕轨。把视频连同字幕文件（SRT）一起给，或者启用语音识别。';
+    }
+  } else {
+    local.transcriptNote = `使用指定转写：${explicit}`;
+  }
+  return local;
 }

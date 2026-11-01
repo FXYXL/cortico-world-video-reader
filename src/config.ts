@@ -60,6 +60,27 @@ export interface VideoReaderConfigSection extends WorldSection {
   cookieSecret: string;
   /** 匿名也能读的站点允许直接跑，不额外警告。 */
   allowAnonymous: boolean;
+
+  /**
+   * 没有字幕轨时用什么转写台词。
+   * - auto（默认）：本机有桌宠自带语音模型就用本地识别，没有就明说没有台词
+   * - sherpa：强制用本地模型
+   * - api：走 OpenAI 兼容的 /audio/transcriptions
+   * - off：不转写，只出画面
+   */
+  asrMode: string;
+  /** auto/sherpa 模式下：指定模型目录（留空自动找 models/desktop-pet/）。 */
+  asrModelDir: string;
+  /** sherpa-onnx-node 的解析路径（留空按包名）。 */
+  asrSherpaPath: string;
+  /** sensevoice 的识别语言：zh/en/ja/ko/yue/auto。 */
+  asrLanguage: string;
+  /** api 模式：OpenAI 兼容端点，如 http://127.0.0.1:8000/v1。 */
+  asrApiUrl: string;
+  /** api 模式：Bearer 令牌（本机服务通常不需要）。 */
+  asrApiKey: string;
+  /** api 模式：模型名。 */
+  asrApiModel: string;
 }
 
 export const VIDEO_READER_DEFAULTS: VideoReaderConfigSection = {
@@ -83,6 +104,15 @@ export const VIDEO_READER_DEFAULTS: VideoReaderConfigSection = {
   ffprobeFile: '',
   cookieSecret: DEFAULT_COOKIE_SECRET,
   allowAnonymous: false,
+  // **默认 auto**：本机有桌宠自带语音模型就直接用（用户零配置），
+  // 没有就明说没有台词——比默默只出画面好。
+  asrMode: 'auto',
+  asrModelDir: '',
+  asrSherpaPath: '',
+  asrLanguage: 'auto',
+  asrApiUrl: '',
+  asrApiKey: '',
+  asrApiModel: 'whisper-1',
 };
 
 /** Core 自动渲染的配置表单。不写自定义面板，省掉前端构建产物。 */
@@ -213,6 +243,52 @@ export const VIDEO_READER_CONFIG_GROUP: ConfigGroup = {
         minimum: 8,
         maximum: 16384,
         description: '达到后继续返回文本索引，不再附图。清理缓存不重置此计数。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrMode': {
+        type: 'string',
+        title: '语音识别（没有字幕轨时）',
+        enum: ['auto', 'sherpa', 'api', 'off'],
+        description:
+          'auto 默认：本机有桌宠自带语音模型（models/desktop-pet/）就直接用，没有就明说没有台词，' +
+          '不会假装听过音频。sherpa 强制用本地模型；api 走下面的 OpenAI 兼容端点；off 只出画面。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrModelDir': {
+        type: 'string',
+        title: '本地语音模型目录',
+        description: '留空自动找桌宠自带的那套（models/desktop-pet/ 下有 model.int8.onnx + tokens.txt）。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrLanguage': {
+        type: 'string',
+        title: '识别语言',
+        enum: ['auto', 'zh', 'en', 'ja', 'ko', 'yue'],
+        description: '只对 SenseVoice 生效；Paraformer 只认中文，会忽略这一项。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrApiUrl': {
+        type: 'string',
+        title: '语音 API 端点',
+        description: 'api 模式用，形如 http://127.0.0.1:8000/v1（会自动拼 /audio/transcriptions）。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrApiKey': {
+        type: 'string',
+        title: '语音 API 令牌',
+        description: '本机服务通常不需要。不要填云端密钥后把配置文件分享出去。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrApiModel': {
+        type: 'string',
+        title: '语音 API 模型名',
+        description: '默认 whisper-1；本地服务可能要求别的名字。',
+        'x-hot': true,
+      },
+      'worlds.video-reader.asrSherpaPath': {
+        type: 'string',
+        title: 'sherpa-onnx-node 路径',
+        description: '留空按包名解析；只有装在奇怪位置时才需要填。',
         'x-hot': true,
       },
       'worlds.video-reader.mediaMaxMB': {

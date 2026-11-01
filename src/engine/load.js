@@ -66,7 +66,7 @@ export async function loadEngine(env) {
   if (pending) return pending;
 
   pending = (async () => {
-    const [pipeline, board, format, spec, cells, probe, mediaStore] = await Promise.all([
+    const [pipeline, board, format, spec, cells, probe, mediaStore, locate, subtitleStrip, bins] = await Promise.all([
       import('./storyboard/pipeline.js'),
       import('./storyboard/board.js'),
       import('./storyboard/format.js'),
@@ -74,6 +74,9 @@ export async function loadEngine(env) {
       import('./storyboard/cells.js'),
       import('./storyboard/probe.js'),
       import('./storyboard/media-store.js'),
+      import('./storyboard/locate.js'),
+      import('./storyboard/subtitle-strip.js'),
+      import('./storyboard/binaries.js'),
     ]);
 
     cached = {
@@ -88,6 +91,11 @@ export async function loadEngine(env) {
       mediaKey: (normalized, height) => mediaStore.mediaKey(normalized, height),
       mediaMaxBytes: () => mediaStore.mediaMaxBytes(),
       pruneMedia: (o) => mediaStore.pruneMedia(o),
+      matchSegments: locate.matchSegments,
+      formatMatches: locate.formatMatches,
+      buildSubtitleStrip: subtitleStrip.buildSubtitleStrip,
+      defaultBand: subtitleStrip.DEFAULT_BAND,
+      resolveMediaBinary: bins.resolveMediaBinary,
     };
     return cached;
   })();
