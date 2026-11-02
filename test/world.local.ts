@@ -10,7 +10,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,10 +113,18 @@ try {
 
   console.log('\n3) 预算账本');
   const usage = JSON.parse(
-    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'state', 'usage.json'), 'utf8')),
+    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'worlds', 'video-reader', 'state', 'usage.json'), 'utf8')),
   );
   check('记了一次出图', usage.calls === 1, `calls=${usage.calls}`);
   check('记了交付字节', usage.deliveredBytes > 0, `${(usage.deliveredBytes / 1024).toFixed(0)}KB`);
+
+  // **目录必须私有**：ctx.dataDir 是全部署共享的（宿主的图片附件就在 data/media 里）
+  const root = join(ctx.dataDir, 'worlds', 'video-reader');
+  check('媒体落在私有目录', existsSync(join(root, 'media')), join(root, 'media'));
+  check('扫描缓存落在私有目录', existsSync(join(root, 'cache')));
+  check('字幕落在私有目录', existsSync(join(root, 'transcripts')));
+  check('没有往共享 data/media 里写视频副本',
+    !existsSync(join(ctx.dataDir, 'media')) || readdirSync(join(ctx.dataDir, 'media')).filter((n: string) => /^[a-f0-9]{20}$/.test(n)).length === 0);
 
   console.log('\n4) textOnly（不算额度、不出图）');
   const textOnly: any = await handlers.get('video_storyboard')({ video: fixture, textOnly: true }, {});
@@ -124,7 +132,7 @@ try {
   check('仍有文本索引', /cell\s*\d/.test(textOnly.text));
   check('说明本次没出图', /只有文本索引/.test(textOnly.text));
   const usage2 = JSON.parse(
-    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'state', 'usage.json'), 'utf8')),
+    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'worlds', 'video-reader', 'state', 'usage.json'), 'utf8')),
   );
   check('textOnly 没有增加出图计数', usage2.calls === 1, `calls=${usage2.calls}`);
 
@@ -134,7 +142,7 @@ try {
   check('成功回执', zoom.failed !== true, zoom.failed ? String(zoom.text).slice(0, 300) : '');
   check('返回了放大图', Array.isArray(zoom.blobs) && zoom.blobs.length > 0, `${zoom.blobs?.length ?? 0} 张`);
   const usage3 = JSON.parse(
-    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'state', 'usage.json'), 'utf8')),
+    await import('node:fs').then((fs) => fs.readFileSync(join(ctx.dataDir, 'worlds', 'video-reader', 'state', 'usage.json'), 'utf8')),
   );
   check('zoom 也计一次', usage3.calls === 2, `calls=${usage3.calls}`);
 

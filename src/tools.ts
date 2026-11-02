@@ -37,7 +37,9 @@ const shared = {
     minimum: 0,
     description:
       'Cap on how many moments you see, 0-10000. Omit or 0 = no cap: every cut becomes a frame. ' +
-      'Set a number only to bound cost - above it the shortest segments get merged (long takes are kept).',
+      'Set a number only to bound cost - above it the shortest segments get merged (long takes are kept). ' +
+      'NOTE: a large cap also makes the returned text index long (one line per cell). 36-40 is usually ' +
+      'plenty; for more coverage use from+segment and read window by window instead of one huge cap.',
   },
   maxSheets: {
     type: 'integer',

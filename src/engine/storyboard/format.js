@@ -652,7 +652,21 @@ export function formatManifest(result, {
   for (const c of picked) {
     // 可变网格没有"第几行第几列"这回事，只有"第几张图的第几格"。
     const where = result.sheets.length > 1 ? ` (image ${c.sheet})` : '';
-    const text = omitTranscript ? '' : truncateAtSentence(c.text, maxCellChars);
+    // **截断必须作用在最终会渲染出来的那份文本上。**
+    //
+    // 上游这里只截 `c.text`，而渲染走的是 `speechOf(c, text)` ——
+    // 后者在格内有 ≥2 句时会给每句加 `[mm:ss.ss]` 前缀，**长度可以翻倍**。
+    // 于是 `detail` 三档（60/120/400 字）在一格装了 5–6 句双语歌词时完全没有区别：
+    // 实测同一支歌 maxFrames:60，low/med/high 三种渲染都是 11924 字，
+    // 因为 `text` 被截到 60 字之后 `speechOf` 又把它按句展开回去了。
+    //
+    // 正确做法：先按句拼一遍（不带前缀），超预算再拿**带前缀的真实长度**去截。
+    const text = omitTranscript ? '' : c.text;
+    let speech = text ? speechOf(c, text) : '';
+    const speechBudget = maxCellChars;
+    if (speech && speech.length > speechBudget) {
+      speech = truncateAtSentence(speech, speechBudget);
+    }
     // sharp 只留在 JSON 清单里：给模型一个 "479.7" 它无法判断好坏，纯占字符
     // frame@ 只在 pick='sharp' 时给：mid 的取帧时刻就是格中点，模型自己能算，
     // 而 sharp 是"3 个候选里选最锐的那个"，**推不出来** —— 少了它就等于暗示"画面在格首"。
@@ -666,7 +680,7 @@ export function formatManifest(result, {
     const head = `cell ${c.i}${where} = ${tc(c.t_start)}-${tc(c.t_end)}` +
       (showFrame ? ` frame@${tc(c.t_frame)}` : '') +
       (c.cuts ? `  cuts ${c.cuts}` : '') + tierTag + markTag;
-    const body = text ? `${head}\n    ${speechOf(c, text)}` : head;
+    const body = text ? `${head}\n    ${speech}` : head;
     if (used + body.length + 1 > maxChars) { stoppedAt = c.i - 1; break; }
     lines.push(body);
     used += body.length + 1;

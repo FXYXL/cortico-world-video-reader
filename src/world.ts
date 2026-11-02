@@ -33,6 +33,7 @@ import { resolveSource, type PreparedSource } from './bridge/source.ts';
 import { UsageLedger } from './bridge/usage.ts';
 import { formatBiliProbe, formatLocalProbe, clock } from './bridge/probe-text.ts';
 import { loadTranscript } from './bridge/transcript.ts';
+import { dirSize, ensureDirs, fileCount, migrateLegacy, type WorldDirs } from './bridge/paths.ts';
 import { resolveAsrConfig } from './bridge/asr.ts';
 
 const ENV_PROMPT_PATH = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
@@ -62,6 +63,8 @@ export class VideoReaderWorld implements World {
   readonly id = VIDEO_READER_ID;
   private host: WorldHost | null = null;
   private readonly ledger: UsageLedger;
+  /** 本 World 的私有目录（见 bridge/paths.ts 的说明：ctx.dataDir 是全部署共享的）。 */
+  private readonly dirs: WorldDirs;
   private lastError: string | null = null;
   /** ffmpeg 自检结果缓存：WebUI 每次渲染都问，不能每次都起一个进程。 */
   private ffprobeCheck: { at: number; ok: boolean } = { at: 0, ok: false };
@@ -69,7 +72,9 @@ export class VideoReaderWorld implements World {
   private sizeCache: { at: number; media: number; cache: number } = { at: 0, media: 0, cache: 0 };
 
   constructor(private readonly ctx: WorldContext<VideoReaderConfigSection>) {
-    this.ledger = new UsageLedger(join(ctx.dataDir, 'state'), ctx.timezone);
+    const dirs = ensureDirs(ctx.dataDir);
+    this.dirs = dirs;
+    this.ledger = new UsageLedger(dirs.state, ctx.timezone);
   }
 
   /* ------------------------------------------------------------ 生命周期 */
@@ -83,6 +88,16 @@ export class VideoReaderWorld implements World {
    */
   async start(host: WorldHost): Promise<void> {
     this.host = host;
+    // 老版本把数据写在共享目录里（详见 bridge/paths.ts 的说明）。
+    // 迁移放在这里、**同步做完再预热**：它只是几次 rename，几十毫秒，
+    // 而"第一次调用工具时才发现媒体还在共享区"会带来更奇怪的现象。
+    try {
+      const r = migrateLegacy(this.ctx.dataDir);
+      if (r.moved > 0) this.log(`迁移了 ${r.moved} 项到私有目录：${r.notes.join('; ').slice(0, 200)}`);
+    } catch (error) {
+      // 迁移失败不该让插件起不来 —— 只是老数据还在原地
+      this.log(`迁移失败（老数据仍在共享目录）：${(error as Error).message.slice(0, 120)}`);
+    }
     void this.warmup();
   }
 
@@ -153,7 +168,7 @@ export class VideoReaderWorld implements World {
   private async engine(): Promise<Engine> {
     const cfg = this.cfg();
     const env = {
-      dataDir: this.ctx.dataDir,
+      dataDir: this.dirs.root,
       ffmpegFile: String(cfg.ffmpegFile ?? ''),
       ffprobeFile: String(cfg.ffprobeFile ?? ''),
       mediaMaxMB: Number(cfg.mediaMaxMB) || 300,
@@ -399,7 +414,7 @@ export class VideoReaderWorld implements World {
     }
 
     const loaded = bvid
-      ? loadTranscript(this.ctx.dataDir, bvid, part, args.transcriptFile as string | undefined)
+      ? loadTranscript(this.dirs.root, bvid, part, args.transcriptFile as string | undefined)
       : {
         source: 'none' as const,
         segments: [],
@@ -455,7 +470,7 @@ export class VideoReaderWorld implements World {
     // 判据只看"站点有没有字幕轨"：有轨就不该来这里。真正烧死的字幕
     // （PV / 歌词 / 双语艺术字）**没有**字幕轨，所以这个判据不会误伤它们。
     const transcript = src.meta
-      ? loadTranscript(this.ctx.dataDir, src.meta.bvid, part, args.transcriptFile as string | undefined)
+      ? loadTranscript(this.dirs.root, src.meta.bvid, part, args.transcriptFile as string | undefined)
       : null;
     if (transcript && transcript.source === 'site-subtitle') {
       throw new Error(
@@ -480,8 +495,7 @@ export class VideoReaderWorld implements World {
       ? (args.band as number[])
       : engine.defaultBand;
 
-    const outPath = join(this.ctx.dataDir, 'state', 'subtitle-strip.png');
-    mkdirSync(join(this.ctx.dataDir, 'state'), { recursive: true });
+    const outPath = join(this.dirs.state, 'subtitle-strip.png');
 
     this.ledger.countCall();
     const { readFile } = await import('node:fs/promises');
@@ -551,7 +565,7 @@ export class VideoReaderWorld implements World {
       frameHeight: Number(cfg.zoomHeight) || 1080,
       client: this.client(),
       engine,
-      dataDir: this.ctx.dataDir,
+      dataDir: this.dirs.root,
       ffmpeg: this.ffmpegPath(),
       ffprobe: this.ffprobePath(),
       ...(callCtx?.signal ? { signal: callCtx.signal } : {}),
@@ -561,6 +575,8 @@ export class VideoReaderWorld implements World {
       // **没有字幕轨时的兜底**。每次调用都重新解析一遍：配置是活引用，
       // 主人刚把模型目录填好，下一次工具调用就该用上。
       asr: resolveAsrConfig({
+        // 这里要的是**部署** dataDir（要一路爬到 D:\Coopanion 去找 resources/app），
+        // 不是私有根 —— 给私有根只会多爬两层，脆在'爬几层'这个假设上。
         dataDir: this.ctx.dataDir,
         mode: String(cfg.asrMode ?? 'auto'),
         modelDir: String(cfg.asrModelDir ?? ''),
@@ -628,15 +644,51 @@ export class VideoReaderWorld implements World {
     head.push(`[cache] ${src.downloaded ? '新下载了一份本地副本' : '命中本地副本（没有重新下载）'}`);
     if (src.hasAudio === false) head.push('[audio] 这份副本没有音轨；底部波条不会出现。');
 
-    const body = engine.formatForDetail(result, {
-      detail: o.detail,
+    /**
+     * **必须压到宿主的告警线以下。**
+     *
+     * 宿主对单次工具回执的上限是 8000 字符（`core/loop.ts` 的 `LARGE_RESULT_WARN_CHARS`），
+     * 超过只在日志里 warn、不截断 —— 但那是真金白银的 token。
+     *
+     * 实测踩过两次：
+     *   1. 鱼闲逛时调 `video_storyboard({ maxFrames: 60 })`，拿到 **9807 字**；
+     *   2. 同一支歌（**双语字幕**，中英各一行）在 maxFrames:60 下 **12176 字** ——
+     *      `maxCellChars` 是 120 字，但那是按字符数的，双语等于每格翻倍。
+     *
+     * 所以这里不只给 maxChars 兜底，还在**总长仍超标**时自动把 `detail` 降一档再渲染一次。
+     * 降档只影响每格贴多少台词（120→60 字），画面和格号一个不变 ——
+     * 而模型真正需要引用的是「第几格 + 什么时间」，不是每格贴满整段字幕。
+     * 截断仍然落在句末、仍然写清 `cellRange` 续读方式，所以不丢内容。
+     */
+    const BODY_BUDGET = 7000;
+    const render = (detail: string) => engine.formatForDetail(result, {
+      detail,
       cellRange: o.cellRange,
+      maxChars: BODY_BUDGET,
     });
+
+    let body = render(o.detail);
+    let usedDetail = o.detail;
+    // 降档序列：med→low；high→med→low。**只降台词量，不降画面**。
+    const ladder: Record<string, string[]> = { high: ['high', 'med', 'low'], med: ['med', 'low'], low: ['low'] };
+    for (const next of (ladder[o.detail] ?? ['low']).slice(1)) {
+      if (body.length <= BODY_BUDGET) break;
+      body = render(next);
+      usedDetail = next;
+    }
 
     const footer = o.textOnly || !result?.sheets?.length
       ? '[依据] 本次只有文本索引，没有出图。'
       : '[依据] 以上是「画面（这些格）＋字幕」的直接观察（evidence=video|subtitle）。' +
         '引用时请带上格号与时间；画面之外的事不要当成看到过。';
+
+    // 真的降了才说 —— 否则每格都白写一句「我没降」
+    if (usedDetail !== o.detail) {
+      head.push(
+        `[detail] 回执太长，每格台词已从 '${o.detail}' 降到 '${usedDetail}'（画面与格号不变）。` +
+        '要读某一格的完整台词，用 video_storyboard({ ..., cellRange: [n, n], textOnly: true }) 只取那一格。',
+      );
+    }
 
     const text = `${head.join('\n')}\n\n${body}\n\n${footer}`;
 
@@ -734,7 +786,7 @@ export class VideoReaderWorld implements World {
           key: 'media',
           label: en ? 'Downloaded copies and scan cache' : '下载副本与扫描缓存',
           kind: 'disk',
-          location: join(this.ctx.dataDir, 'media'),
+          location: this.dirs.media,
           note: en
             ? 'Deleting them only means the next read downloads again; the usage ledger is not reset.'
             : '删掉只意味着下次读要重新下载；用量账本不会因此重置。',
@@ -744,7 +796,7 @@ export class VideoReaderWorld implements World {
             this.ledger.describe(),
           clear: async () => {
             let freed = 0;
-            for (const dir of [join(this.ctx.dataDir, 'media'), join(this.ctx.dataDir, 'cache')]) {
+            for (const dir of [this.dirs.media, this.dirs.cache]) {
               freed += dirSize(dir);
               rmSync(dir, { recursive: true, force: true });
             }
@@ -760,19 +812,19 @@ export class VideoReaderWorld implements World {
           key: 'transcripts',
           label: en ? 'Saved subtitle tracks' : '已保存的字幕轨',
           kind: 'disk',
-          location: join(this.ctx.dataDir, 'transcripts'),
+          location: this.dirs.transcripts,
           note: en
             ? 'One JSON per video part, taken from the site subtitle track. Deleting one only means it is fetched again.'
             : '每条视频分P 一个 JSON，取自 B站字幕轨。删掉只意味着下次读会重新取一遍。',
           stat: () => {
-            const dir = join(this.ctx.dataDir, 'transcripts');
+            const dir = this.dirs.transcripts;
             const n = fileCount(dir);
             return n === 0
               ? (en ? 'none yet' : '还没有')
               : en ? `${n} file(s), ${(dirSize(dir) / 1048576).toFixed(1)} MB` : `${n} 个，共 ${(dirSize(dir) / 1048576).toFixed(1)} MB`;
           },
           clear: async () => {
-            const dir = join(this.ctx.dataDir, 'transcripts');
+            const dir = this.dirs.transcripts;
             const n = fileCount(dir);
             rmSync(dir, { recursive: true, force: true });
             return en ? `Removed ${n} file(s).` : `已删掉 ${n} 个字幕文件。`;
@@ -787,55 +839,11 @@ export class VideoReaderWorld implements World {
     if (now - this.sizeCache.at < 30_000) return this.sizeCache;
     this.sizeCache = {
       at: now,
-      media: dirSize(join(this.ctx.dataDir, 'media')),
-      cache: dirSize(join(this.ctx.dataDir, 'cache')),
+      media: dirSize(this.dirs.media),
+      cache: dirSize(this.dirs.cache),
     };
     return this.sizeCache;
   }
-}
-
-/* ------------------------------------------------------------------ 工具 */
-
-/**
- * 目录里有多少个文件。**不递归**：字幕目录是平铺的（每条视频分P 一个 JSON），
- * 递归只会让一次"看看有几个"变成一次遍历。读不了就报 0 —— 面板显示少一个数，
- * 比面板整个崩掉好。
- */
-function fileCount(dir: string): number {
-  try {
-    return readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).length;
-  } catch {
-    return 0;
-  }
-}
-
-/** 目录体积，**有上限地**走：只为了在面板上显示一个数量级，不值得遍历几万个文件。 */
-function dirSize(dir: string, budget = 4000): number {
-  let total = 0;
-  let seen = 0;
-  const stack = [dir];
-  while (stack.length && seen < budget) {
-    const cur = stack.pop() as string;
-    let names: string[];
-    try {
-      names = readdirSync(cur);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (seen >= budget) break;
-      const p = join(cur, name);
-      try {
-        const st = statSync(p);
-        seen += 1;
-        if (st.isDirectory()) stack.push(p);
-        else total += st.size;
-      } catch {
-        /* 走到一半被删了：跳过 */
-      }
-    }
-  }
-  return total;
 }
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
