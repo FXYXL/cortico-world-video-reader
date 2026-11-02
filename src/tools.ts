@@ -66,6 +66,26 @@ const shared = {
       'Pixels per image. 640000 = 800x800 is the ceiling - the vision API caps a picture there, so a ' +
       'larger number is silently downscaled and the cell sizes in the manifest stop being true.',
   },
+  tierMap: {
+    type: 'object',
+    description:
+      'Override the computed cell sizes, one entry per source tier: {"1":3,"5":4}. ' +
+      'Tiers run 1-8 (1 = full width, 8 = 1/8 side). This runs AFTER `strategy`, and tiers you do not ' +
+      'list keep their computed value. Mapping several tiers to the same value merges their visual size ' +
+      '(e.g. {"5":4,"6":4,"7":4,"8":4} turns every fast-cut cell into a 1/4 cell). Mapping everything to 1 ' +
+      'makes every frame full-width and multiplies the image count - the manifest always prints the result.',
+    properties: {
+      '1': { type: 'integer' },
+      '2': { type: 'integer' },
+      '3': { type: 'integer' },
+      '4': { type: 'integer' },
+      '5': { type: 'integer' },
+      '6': { type: 'integer' },
+      '7': { type: 'integer' },
+      '8': { type: 'integer' },
+    },
+    additionalProperties: false,
+  },
   textOnly: {
     type: 'boolean',
     description:
@@ -135,6 +155,7 @@ export const VIDEO_READER_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = 
       additionalProperties: false,
       properties: {
         ...shared,
+        tierMap: shared.tierMap,
         from: { type: 'number', description: 'Window start in seconds (default 0). Only this window is scanned.' },
         to: {
           type: 'number',
@@ -201,6 +222,7 @@ export const VIDEO_READER_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = 
           description: 'Size policy; defaults to the biggest cells. Lower it only for a very busy window.',
         },
         detail: shared.detail,
+        tierMap: shared.tierMap,
         transcriptFile: shared.transcriptFile,
       },
       required: ['video'],

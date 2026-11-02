@@ -33,6 +33,7 @@ import { resolveSource, type PreparedSource } from './bridge/source.ts';
 import { UsageLedger } from './bridge/usage.ts';
 import { formatBiliProbe, formatLocalProbe, clock } from './bridge/probe-text.ts';
 import { loadTranscript } from './bridge/transcript.ts';
+import { audioHint } from './bridge/audio-hint.ts';
 import { dirSize, ensureDirs, fileCount, migrateLegacy, type WorldDirs } from './bridge/paths.ts';
 import { resolveAsrConfig } from './bridge/asr.ts';
 
@@ -245,6 +246,32 @@ export class VideoReaderWorld implements World {
           (e): SubtitleInfo => ({ available: false, reason: message(e), segments: [] }),
         ),
       ]);
+      /**
+       * **音频画像只在本机已有副本时做。**
+       *
+       * probe 的承诺是"不下载、不出图、不花图片 token"（几毫秒）。
+       * 为了听一遍音频去下载几十 MB，等于把 probe 变成 storyboard —— 方向反了。
+       *
+       * 但"这条是配乐还是口播"恰恰能省下 30–40 秒（实测：两次纯音乐片跑完语音识别
+       * 什么都没听到，还丢掉了 4 条幻觉）。所以折中：**缓存里有就听**（零成本），
+       * 没有就不听。正文里会因此少一行，那不是缺陷 —— 是 probe 没越界。
+       */
+      let audio: { kind: string; text: string } | null = null;
+      try {
+        const engine = await this.engine();
+        const cachedPath = join(
+          engine.mediaDir(),
+          engine.mediaKey(`bilibili:${meta.bvid}:p${meta.part}@${scanHeight}`, scanHeight),
+          'video.mp4',
+        );
+        if (existsSync(cachedPath)) {
+          const hint = await audioHint({ input: cachedPath, ffmpegPath: this.ffmpegPath() });
+          if (hint) audio = { kind: hint.kind, text: hint.text };
+        }
+      } catch {
+        // 分析失败不该让 probe 失败 —— 它只是锦上添花
+      }
+
       return {
         text: formatBiliProbe({
           meta,
@@ -253,13 +280,28 @@ export class VideoReaderWorld implements World {
           loggedIn: client.loggedIn,
           scanHeight,
           withCookie: Boolean(this.cookie()),
+          audio,
         }),
       };
     }
 
     const engine = await this.engine();
     const info = await engine.probeVideo(input, { ffprobePath: this.ffprobePath() });
-    return { text: formatLocalProbe(info, input) };
+    // 本地文件本来就在盘上，直接听 —— 成本可以忽略（一条 3 分钟的音轨约 1 秒）
+    let audio: { kind: string; text: string } | null = null;
+    try {
+      if (info?.hasAudio) {
+        const hint = await audioHint({
+          input,
+          ffmpegPath: this.ffmpegPath(),
+          to: Number(info.duration) || undefined,
+        });
+        if (hint) audio = { kind: hint.kind, text: hint.text };
+      }
+    } catch {
+      /* 同上 */
+    }
+    return { text: formatLocalProbe(info, input, audio) };
   }
 
   /* ------------------------------------------------------------ video_storyboard */
@@ -310,6 +352,31 @@ export class VideoReaderWorld implements World {
       ...(callCtx?.signal ? { signal: callCtx.signal } : {}),
     });
 
+    /**
+     * **给格子表补一个 BV 别名。**
+     *
+     * 引擎的 `saveCells([inputRaw, input])` 只写进了本地路径 —— 因为 `pipeline` 里的
+     * `inputRaw` 在 `resolveInput()` 之后已经是本地路径了，"原始 URL 别名"这条分支
+     * 实际上是空的。
+     *
+     * 而模型下一轮要 `video_zoom({ video: 'BV…', cellId: 7 })` 时手上只有 BV 号，
+     * 查不到就只能退回 from/to 手抄时间码 —— 那正是 `cellId` 要消灭的动作。
+     * 所以这里按 bvid 再写一份（`cells.json` 本身就是按"键 → 同一张表"存的，
+     * 多个键指向同一份 cells 数组，成本只有几 KB）。
+     */
+    if (!textOnly && src.meta && Array.isArray(result.sheets) && result.sheets.length) {
+      try {
+        const cells = result.sheets.flatMap((s: any) =>
+          (s.cells ?? []).map((c: any) => ({ i: c.i, from: c.t_start, to: c.t_end })),
+        );
+        if (cells.length) {
+          await engine.saveCells([src.localPath, `bilibili:${src.meta.bvid}:p${src.meta.part}`], cells);
+        }
+      } catch {
+        // 别名写不进去只影响"下次用 BV 号寻址"，不该让这次调用失败
+      }
+    }
+
     return this.finish(engine, result, src, {
       kind: 'board',
       detail: options.detail,
@@ -340,11 +407,33 @@ export class VideoReaderWorld implements World {
     let from = args.from;
     let to = args.to;
     if (cellId !== null) {
-      const hit = await engine.lookupCell(src.localPath, cellId);
+      /**
+       * **寻址要同时试几个键。**
+       *
+       * `cells.json` 以**输入字符串**为键。引擎的 `saveCells([inputRaw, input])` 本意是
+       * 同时存"URL 和本地路径"两个别名，但 `pipeline` 里的 `inputRaw` 在
+       * `resolveInput()` 之后就变成**本地路径**了 —— 所以表里只有本地路径。
+       * 模型下一轮拿 BV 号来寻址就查不到。
+       *
+       * 而模型最常见的用法正是「上一轮跑过 storyboard，这一轮说『第 7 格放大』」，
+       * 那时它手上只有 BV 号。所以按优先级试三个键，并在失败时把查过的键写出来
+       * （否则这种"明明刚跑过却说没有"的错最难查）。
+       */
+      const keys = [
+        src.localPath,
+        String(args.video ?? '').trim(),
+        src.meta ? `bilibili:${src.meta.bvid}:p${src.meta.part}` : '',
+      ].filter(Boolean);
+      let hit: { from: number; to: number; i: number } | null = null;
+      for (const key of keys) {
+        hit = await engine.lookupCell(key, cellId);
+        if (hit) break;
+      }
       if (!hit) {
         throw new Error(
-          `找不到第 ${cellId} 格：这张格子表不在缓存里（可能换了清晰度、或还没跑过 video_storyboard）。` +
-            '先对同一个视频跑一次 video_storyboard，或者直接给 from/to（秒）。',
+          `找不到第 ${cellId} 格：格子表里没有这个键（可能清了缓存、换了清晰度档位，或还没跑过 video_storyboard）。` +
+            '先对同一个视频跑一次 video_storyboard，或者直接给 from/to（秒）。' +
+            `（查过：${keys.join(' / ')}）`,
         );
       }
       from = hit.from;

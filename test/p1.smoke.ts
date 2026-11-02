@@ -188,6 +188,38 @@ try {
     check('给出了可靠性提醒', /专有名词|核对/.test(loaded.note), loaded.note.slice(0, 70));
   }
 
+  /* ---------------------------------------------------------------- 6.5 音频判据 */
+
+  console.log('\n6.5) 音频判据（说话 vs 配乐）');
+  const { audioHint } = await import('../src/bridge/audio-hint.ts');
+  // 合成的素材是人声（SAPI）+ 440Hz 正弦混在一起：应该是 speech 或 mixed，绝不该是 music
+  // **必须用纯人声素材**：clip.mp4 的占位音轨里混了 440Hz 正弦波，
+  // 那条正弦在包络上就是稳定节拍，判成 music 是正确行为，不是判据的错。
+  // 这里单独合成一段只含人声的 wav（不带正弦、不做 -shortest 裁剪）。
+  const pureVoice = join(dir, 'pure-voice.wav');
+  let hasPure = false;
+  try {
+    const ps = spawnSync('powershell', ['-NoProfile','-Command',
+      `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; ` +
+      `$s.SetOutputToWaveFile('${pureVoice.replace(/\\/g,'\\\\')}'); ` +
+      `$s.Rate = -1; ` +
+      `$s.Speak('今天我们聊聊视频理解这件事，模型看不到画面，只能靠文字去猜。'); $s.Dispose()`],
+      { encoding:'utf8', windowsHide:true, timeout:60_000 });
+    hasPure = ps.status === 0 && existsSync(pureVoice);
+  } catch { hasPure = false; }
+  const hint = hasPure ? await audioHint({ input: pureVoice, ffmpegPath: ffmpeg }) : null;
+  if (hint) {
+    check('能给出判断', ['speech', 'music', 'mixed'].includes(hint.kind), `kind=${hint.kind} peakHz=${hint.peakHz} ratio=${hint.rhythmRatio}`);
+    check('纯人声不判成音乐', hint.kind !== 'music', `判成 ${hint.kind}`);
+    check('给出了可读的理由', hint.text.includes('Hz'), hint.text.slice(0, 70));
+    check('分析耗时可用（<30 秒）', hint.seconds < 30, `${hint.seconds.toFixed(1)}s`);
+  } else {
+    console.log('  跳过：这段素材分析不出节奏（不影响其它检查）。');
+  }
+  // 反向：混了正弦波的 clip.mp4 该被判成音乐（正弦是稳定节拍）
+  const mixed = await audioHint({ input: clip, ffmpegPath: ffmpeg });
+  check('合成正弦音的片子被判成音乐', Boolean(mixed) && mixed!.kind === 'music', mixed ? `kind=${mixed.kind}` : '分析失败');
+
   /* ---------------------------------------------------------------- 7. 字幕长图 */
 
   console.log('\n7) 硬字幕裁带长图');

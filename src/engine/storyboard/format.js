@@ -172,12 +172,12 @@ export async function formatProbe(info) {
     const estFrames = 96 * estSheets;
     lines.push(`How to read ${mins.toFixed(0)} min: **window by window, not one overview.**`);
     lines.push(`  • SEQUENCE (no spoilers, like watching it) — default for films / episodes / any story:`);
-    lines.push(`      video_storyboard({ input, from: 0, segment: ${segSec} })`);
+    lines.push(`      video_storyboard({ video, from: 0, segment: ${segSec} })`);
     lines.push(`    ${totalSeg} windows. Every result ends with "segment k/${totalSeg} · x% watched · ` +
       `y min left · next: from=…"; pass that from back with the same segment. ` +
       `One image (~${perImage} vision tokens) per window; ASR is transcribed once per window, cached after that.`);
     lines.push(`  • STRUCTURE (spoils the ending) — **only to identify what this is, or when spoilers are allowed**:`);
-    lines.push(`      video_storyboard({ input, maxFrames: ${estFrames} }) → up to ${estFrames} frames ` +
+    lines.push(`      video_storyboard({ video, maxFrames: ${estFrames} }) → up to ${estFrames} frames ` +
       `at ~${px.w}×${px.h} for the 1/3 tier, ~${perImage * estSheets} vision tokens.`);
     lines.push('    The tier is decided by cut density, not by you: fast-cutting stretches get 1/8-size ' +
       'cells (100×56 on a 800-wide canvas), long takes get 1/1. Lower `strategy` to "saver"/"frugal" ' +
@@ -227,7 +227,7 @@ export function formatRemoteProbe(remote) {
     const segSec = 300;
     lines.push(`note: ${Math.round(dur / 60)} min long — read it in windows, not one pass. ` +
       `For narrative content the default is SEQUENCE: ` +
-      `video_storyboard({ input, from: 0, segment: ${segSec} }) — ` +
+      `video_storyboard({ video, from: 0, segment: ${segSec} }) — ` +
       `${Math.ceil(dur / segSec)} windows, and every result tells you the next from. ` +
       'A one-shot overview (cells:16 over the whole file) spoils the ending and makes each cell unreadable.');
   }
@@ -470,22 +470,17 @@ export function formatManifest(result, {
       `range and its index out of ${result.sheets.length}. The sheets are ${result.sheets.length} separate ` +
       'windows, not one long strip: read the numbers on the image before stitching anything together.');
   }
-  // **要了多少、出了多少、为什么少**：旧版只写一个数，模型以为 16 格都看到了。
-  // 少给通常不是 bug（窗口里只有 8 个镜头，再多就是重复帧），但必须说出来并给改法。
-  {
-    const askedTotal = result.plan?.requested?.cells ?? null;
-    if (askedTotal !== null && producedCells < askedTotal) {
-      const shots = result.plan?.inputs?.cuts !== undefined
-        ? Number(result.plan.inputs.cuts) + 1 : null;
-      const gap = Number(result.plan?.minGap);
-      const gapNote = Number.isFinite(gap) && gap >= 1
-        ? ` and minGap ${gap}s forbids re-sampling one shot` : '';
-      lines.push(`cells: asked ${askedTotal}, produced ${producedCells}` +
-        (shots ? ` — the window has ~${shots} distinct shots` : '') + gapNote +
-        '. Extra cells would be repeats of the same shot. Ask for fewer cells, ' +
-        'widen the window (more shots), or lower minGap to 0.4-0.6 if the shots are long.');
-    }
-  }
+  // **这一段是死代码，已删除（2026-11-02）。**
+  //
+  // 它读 `result.plan?.requested?.cells` 与 `result.plan?.minGap` ——
+  // 这两个字段在 pipeline 的 `planInfo` 里**都不存在**：
+  // `plan.cells` 现在直接就是实际值，`minGap` 早改名 `scanGap`。
+  // 所以 `askedTotal` 永远是 null，整块不会执行；留着只会让下一个人
+  // 以为"要求的格数还能被报出来"。
+  //
+  // "帧数被合并"这件事已经在 `plan.adjusted` 里报过了（形如 `frames-merged:248->37`），
+  // 那里是唯一真实的数据源。
+
   // 格子小到看不清时**主动说**，并给三条可执行的改法（旧版对"看不清"完全沉默）
   const advice = readabilityAdvice(result.plan);
   if (advice) lines.push(advice);
@@ -624,7 +619,7 @@ export function formatManifest(result, {
   if (result.plan?.bursts?.length) {
     const top = [...result.plan.bursts].sort((a, b) => (b.shots ?? 0) - (a.shots ?? 0)).slice(0, 3);
     lines.push(`fast cuts: ${top.map((b) => `${tc(b.from)}-${tc(b.to)} (${b.shots} shots)`).join(', ')}` +
-      ' — video_zoom({ from, to, cells: 6, minGap: 0.4 }) splits these into single shots.');
+      ' — video_zoom({ video, from, to, maxFrames: 6, scanGap: 0.4 }) splits these into single shots.');
   }
 
   // 切点不多时直接列出精确时间：条带只能读个 ±2~4 秒的大概，而这一行是 0.01 秒的准确值。

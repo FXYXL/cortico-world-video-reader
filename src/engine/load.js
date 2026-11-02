@@ -86,6 +86,7 @@ export async function loadEngine(env) {
       validateToolArgs: spec.validateToolArgs,
       validateZoomArgs: spec.validateZoomArgs,
       lookupCell: (path, cellId) => cells.lookupCell(path, cellId),
+      saveCells: (path, list) => cells.saveCells(path, list),
       probeVideo: probe.probeVideo,
       mediaDir: () => mediaStore.mediaDir(),
       mediaKey: (normalized, height) => mediaStore.mediaKey(normalized, height),

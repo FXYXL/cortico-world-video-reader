@@ -31,6 +31,8 @@ export interface ProbeFacts {
   loggedIn: boolean;
   scanHeight: number;
   withCookie: boolean;
+  /** 这一段像说话还是像配乐；分析不出来时省略。 */
+  audio?: { kind: string; text: string } | null;
 }
 
 export function formatBiliProbe(f: ProbeFacts): string {
@@ -67,6 +69,10 @@ export function formatBiliProbe(f: ProbeFacts): string {
       ? `subtitles: YES${subtitle.langDoc ? ` (${subtitle.langDoc})` : ''} — ${subtitle.segments.length} lines; the storyboard will quote them per cell, no ASR needed.`
       : `subtitles: NO — ${subtitle.reason ?? 'not provided'}; the storyboard will be visual only.`,
   );
+
+  // **该不该指望台词**：放在读法建议之前，因为它直接决定"要不要等语音识别"。
+  // 实测两次纯音乐片调 video_storyboard 各花 30–40 秒在识别上，而这一步就能省掉。
+  if (f.audio) lines.push(`audio: ${f.audio.text}`);
 
   // 读法建议
   const mins = meta.partDuration / 60;
@@ -107,7 +113,7 @@ export function formatBiliProbe(f: ProbeFacts): string {
 }
 
 /** 本地文件的 probe：交给引擎的 ffprobe，正文只补一句读法。 */
-export function formatLocalProbe(info: any, path: string): string {
+export function formatLocalProbe(info: any, path: string, audio?: { kind: string; text: string } | null): string {
   const lines = [
     `<video source="local" path="${path}" duration="${Number(info.duration).toFixed(2)}s" ` +
       `size="${info.width}x${info.height}" fps="${Number(info.fps).toFixed(2)}" ` +
@@ -124,6 +130,8 @@ export function formatLocalProbe(info: any, path: string): string {
     lines.push(`one call is enough — video_storyboard({ video: "${path.replace(/\\/g, '\\\\')}" }).`);
   }
   if (!info.hasAudio) lines.push('no audio track; the grid is visual only.');
+  // **该不该指望台词**：本地文件听一遍只要~1 秒，而一次白跑的语音识别要 30 秒。
+  if (audio) lines.push(`audio: ${audio.text}`);
   lines.push('local files are read at their own resolution; nothing is downloaded.');
   return lines.join('\n');
 }

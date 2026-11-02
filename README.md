@@ -91,6 +91,18 @@ Windows 上装 ffmpeg 最省事的方式：从 [gyan.dev](https://www.gyan.dev/f
 社交视窗自带的 `socialmedia_watch` 只能抽 2 帧 360P，和本扩展不是一个量级。
 建议把它停掉，避免模型二选一：
 
+## 两个策略旋钮
+
+除了三个主要旋钮（`maxFrames` / `strategy` / `budget`），还有两个**精度**旋钮，只在需要时用：
+
+- `tierMap` — 精确覆盖每一档的格子尺寸。`{\"5\":4,\"6\":4,\"7\":4,\"8\":4}` 把快剪区统一压成 1/4 格
+  （少了豆腐块、张数不变）；`{\"1\":1,…}` 全部放大到全宽（张数翻倍，manifest 会报）。
+- `budget` — 一张图多少像素。640000 是天花板（800×800），再高会被宿主的视觉上限缩回去。
+
+## 让模型优先用本扩展
+
+社交视窗自带的 `socialmedia_watch` 只能抽 2 帧 360P。建议把它停掉：
+
 ```json
 "worlds": {
   "socialmedia": { "media": { "maxDailyVisualCalls": 0 } }

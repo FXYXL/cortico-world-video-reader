@@ -49,10 +49,10 @@ export function storyboardToolSpec() {
       'so you can cite a moment or ask for a close-up with video_zoom({ cellId: 7 }).',
       '',
       'Use it like this:',
-      '- Whole short clip: video_storyboard({ input })',
-      '- Long film, read in order (SEQUENCE): video_storyboard({ input, from: 0, segment: 300 }) —',
+      '- Whole short clip: video_storyboard({ video })',
+      '- Long film, read in order (SEQUENCE): video_storyboard({ video, from: 0, segment: 300 }) —',
       '  every result prints "segment 5/22 · 22% watched · 82 min left · next: from=..."',
-      '- One wide look at a long film (STRUCTURE, spoilers): video_storyboard({ input, maxFrames: 96 })',
+      '- One wide look at a long film (STRUCTURE, spoilers): video_storyboard({ video, maxFrames: 96 })',
       '',
       'KNOBS THAT MATTER (there are only three):',
       '- maxFrames: how many moments you see at most (default 96).',
@@ -452,7 +452,7 @@ export function probeToolSpec() {
       '',
       'Call this FIRST when you do not already know how long the file is. It costs no image tokens.',
       'Then read it: for a film / episode / any story use SEQUENCE —',
-      'video_storyboard({ input, from: 0, segment: 300 }) and follow the "next: from=..." it prints.',
+      'video_storyboard({ video, from: 0, segment: 300 }) and follow the "next: from=..." it prints.',
       'A one-shot overview of the whole file is only for identifying what it is (it spoils the ending',
       'and makes every cell smaller). video_zoom is for a close-up of one moment.',
     ].join('\n'),
@@ -655,7 +655,8 @@ export function validateToolArgs(args) {
   if (args.to !== undefined && args.from !== undefined && args.to <= args.from) {
     problems.push('to must be greater than from');
   }
-  if (args.minGap !== undefined && !(args.minGap >= 0)) problems.push('minGap must be >= 0');
+  // minGap 是旧名，现在叫 scanGap；这里保留兼容检查，但提示用新名
+  if (args.minGap !== undefined && !(args.minGap >= 0)) problems.push('minGap (now: scanGap) must be >= 0');
   if (args.transcript !== undefined && !['auto', 'off'].includes(args.transcript)) {
     problems.push("transcript must be 'auto' or 'off'");
   }
