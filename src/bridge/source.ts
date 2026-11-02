@@ -14,7 +14,7 @@
  * 于是容量淘汰、磁盘余量检查这些不用重写一份。
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Engine } from '../engine/load.js';
@@ -114,9 +114,38 @@ async function resolveBilibili(o: ResolveOptions, raw: string): Promise<Prepared
   let hasAudio: boolean | null = null;
   if (!existsSync(localPath) || statSync(localPath).size === 0) {
     mkdirSync(dir, { recursive: true });
-    const merged = await client.download(play, localPath, o.ffmpeg, { signal: o.signal });
-    downloaded = true;
-    hasAudio = merged.hasAudio;
+    /**
+     * **失败时重取一次直链。**
+     *
+     * B站的播放地址带签名，有效期约 2 小时；而且 `playurl` 返回的 CDN 域名会变。
+     * 实测踩过：一次下载失败，回执里是
+     * `Error opening input file https://…mcdn.bilivideo.cn:8082/…` —— 那条直链打不开了。
+     * 只重试同一个 URL 必然还是失败（签名过期或该 CDN 节点挂了），
+     * 而重新调一次 `playurl` 就能拿到新签名/新节点。
+     *
+     * 所以这里试两轮：第二轮**重新取流**再下。两轮都失败就把最终原因抛出去
+     * （原因里不该带 URL —— 见 `explainFfmpegStderr`）。
+     */
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const fresh = attempt === 1 ? play : await client.playurl(meta, height, o.signal);
+        const merged = await client.download(fresh, localPath, o.ffmpeg, {
+          signal: o.signal,
+          durationSec: meta.partDuration || meta.duration,
+        });
+        downloaded = true;
+        hasAudio = merged.hasAudio;
+        break;
+      } catch (error) {
+        // 第一轮失败先把半成品清掉：留下 0 字节或半个文件会让下一轮"看起来命中了缓存"
+        try {
+          if (existsSync(localPath) && statSync(localPath).size === 0) rmSync(localPath, { force: true });
+        } catch {
+          /* 删不掉就算了 */
+        }
+        if (attempt === 2) throw error;
+      }
+    }
     // 落一份 meta：出问题时不用重新调接口就能对上"当时拿到的是哪一档"
     try {
       writeFileSync(

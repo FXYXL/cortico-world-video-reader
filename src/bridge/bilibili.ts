@@ -393,7 +393,7 @@ export class BilibiliClient {
     info: PlayInfo,
     out: string,
     ffmpeg: string,
-    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+    opts: { signal?: AbortSignal; timeoutMs?: number; durationSec?: number } = {},
   ): Promise<{ hasAudio: boolean }> {
     // info.height 是 playurl 已经按请求档位过滤后的结果；null 表示源站连最低档都没给。
     const videosAt = info.height === null
@@ -401,6 +401,23 @@ export class BilibiliClient {
       : info.videos.filter((t) => (t.height ?? 0) <= info.height! + 1);
     const video = pickBest(videosAt.length ? videosAt : info.videos) ?? null;
     const audio = pickBest(info.audios) ?? null;
+
+    /**
+     * **超时按片长算，不要一个固定的 20 分钟。**
+     *
+     * 原来写死 20 分钟。实测一条 3 分钟、20MB 的 480p 视频因为 CDN 直链
+     * 打开失败，**真的耗了 746 秒**才失败 —— 期间模型和用户都在干等，
+     * 而这条片正常下载只要 10 秒。
+     *
+     * 现在按片长给：`片长 × 3 + 60 秒`，下限 90 秒、上限 10 分钟。
+     * 3 分钟的片子 → 249 秒仍在合理范围，但比 20 分钟快了 4 倍失败；
+     * 一条 2 小时的电影 → 10 分钟封顶（再长就是真出问题了）。
+     */
+    const dur = Number(opts.durationSec) || 0;
+    const timeoutMs = opts.timeoutMs ?? (dur > 0
+      ? Math.min(10 * 60_000, Math.max(90_000, dur * 3000 + 60_000))
+      : 5 * 60_000);
+
     const args = ['-hide_banner', '-v', 'error', '-y'];
 
     if (!video && info.progressive) {
@@ -534,9 +551,56 @@ export function runFfmpeg(
     });
     child.on('close', (code) => {
       finish(() => {
-        if (code === 0) resolve();
-        else reject(new BiliError(`${label}失败（退出码 ${code}）：${stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`, 'network'));
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new BiliError(`${label}失败（${code}）：${explainFfmpegStderr(stderr)}`, 'network'));
       });
     });
   });
+}
+
+/**
+ * 把 ffmpeg 的 stderr 压成一句**能照着做**的话。
+ *
+ * ## 为什么不能直接截最后三行
+ *
+ * 实测踩过：一条 3 分钟的 B站视频下载失败，回执里是
+ *
+ *   `B站视频流下载失败（1）： | Error opening input file https://xy39x184x182x21xy.mcdn…`
+ *
+ * 400 字的额度**全被那条带签名的 CDN URL 吃掉了**，真正的原因（HTTP 状态、
+ * 是否超时、磁盘满）一个字都没留下。模型的反应只能是"再试一次"——
+ * 而那条 URL 的签名已经过期，再试必然还是失败。
+ *
+ * 所以这里：
+ *   1. **先丢掉 URL**：`https://…` 换成 `<url>`（签名是可回收垃圾，不该进回执）；
+ *   2. **优先挑诊断行**：Error/Invalid/No such/Permission/HTTP 4xx、5xx 那些；
+ *   3. 再退回最后一行非空内容；
+ *   4. 最后才硬截 300 字。
+ */
+export function explainFfmpegStderr(stderr: string): string {
+  const raw = String(stderr ?? '');
+  if (!raw.trim()) return '没有输出（可能是网络中断或磁盘空间不足）';
+
+  const lines = raw
+    .split('\n')
+    .map((l) => l.trim())
+    // 签名 URL 不该进回执：它既不是原因，又长到能把原因挤掉
+    .map((l) => l.replace(/https?:\/\/\S+/g, '<url>'))
+    .filter(Boolean);
+  if (lines.length === 0) return '没有输出';
+
+  // 1) 明确的诊断行优先
+  const diagnostic = lines.find((l) =>
+    /HTTP\s*(error)?\s*[45]\d\d|Error opening|Invalid data|No such file|Permission denied|ENOSPC|Connection|timed? ?out|Server returned|403|404|412|429/i.test(l),
+  );
+  if (diagnostic) {
+    // 带上它后面的那半句（ffmpeg 常把原因写在同一行的后半段）
+    return diagnostic.replace(/^\[[^\]]*\]\s*/, '').slice(0, 300);
+  }
+
+  // 2) 退回最后一行（最常见的是 "Conversion failed!" 之类）
+  return lines[lines.length - 1].replace(/^\[[^\]]*\]\s*/, '').slice(0, 300);
 }
