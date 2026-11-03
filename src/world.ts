@@ -734,6 +734,32 @@ export class VideoReaderWorld implements World {
     if (src.hasAudio === false) head.push('[audio] 这份副本没有音轨；底部波条不会出现。');
 
     /**
+     * **台词密度太低时主动说一句。**
+     *
+     * 实测踩过：《一等情事》217 秒、没有字幕轨，语音识别转了 5 个切片、
+     * 丢弃 4 条音乐段幻觉，最后只捞回 **1 句 31 字**（0.14 字/秒）。
+     *
+     * 那 12 秒的识别劳动本身没错，错在**结果没说清它意味着什么**：
+     * 模型看到 `[transcript] 转写了 5 个切片…1 句`，很容易以为"有台词可以引用"，
+     * 于是把一条画面/音乐驱动的片子当口播内容分析 —— 它的评论就建立在
+     * 31 个可能还听错的字上了。
+     *
+     * 判据不猜：直接用引擎算好的 `charsPerSec`（台词总字数 ÷ 窗口时长）。
+     * 低于 0.5 = 基本没有说话；0 = 一句都没有。正常口播（2 字/秒以上）不吭声。
+     */
+    const tr = (result as any)?.transcript;
+    const cps = Number(tr?.charsPerSec);
+    if (Number.isFinite(cps) && cps === 0) {
+      head.push('[台词密度] 这个窗口里一个字都没有 —— 纯画面 / 纯音乐片，别等台词。');
+    } else if (Number.isFinite(cps) && cps > 0 && cps < 0.5) {
+      head.push(
+        `[台词密度] 只有 ${Number(tr?.chars) || '?'} 字、${cps.toFixed(2)} 字每秒 —— **这条几乎没有可读的台词**。` +
+          '它更像是画面或音乐驱动的片子，别把它当口播内容分析。' +
+          '要判断"这片子好在哪"，看格子和切点密度，而不是这几句词。',
+      );
+    }
+
+    /**
      * **必须压到宿主的告警线以下。**
      *
      * 宿主对单次工具回执的上限是 8000 字符（`core/loop.ts` 的 `LARGE_RESULT_WARN_CHARS`），

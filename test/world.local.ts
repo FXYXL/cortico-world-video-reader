@@ -109,6 +109,9 @@ try {
   check('文本有格号与时间', /cell\s*\d/.test(board.text) && /\d{2}:\d{2}\.\d{2}/.test(board.text));
   check('头部说明了缓存与分辨率', /\[cache\]/.test(board.text) && /\[resolution\]/.test(board.text));
   check('尾部声明依据', /\[依据\]/.test(board.text));
+  // 合成素材的音轨是正弦波，没有任何台词 → 必须报「一个字都没有」
+  check('无台词素材会报台词密度', /台词密度\].*一个字都没有|台词密度\].*没有可读的台词/.test(board.text),
+    (board.text.split('\n').find((l: string) => /台词密度\]/.test(l)) ?? '（没有这一行）').slice(0, 90));
   check('没有假装看过全片', /不包含完整观看|未听音轨|画面之外/.test(board.text) || /画面之外的事不要当成看到过/.test(board.text));
 
   console.log('\n3) 预算账本');
@@ -125,6 +128,25 @@ try {
   check('字幕落在私有目录', existsSync(join(root, 'transcripts')));
   check('没有往共享 data/media 里写视频副本',
     !existsSync(join(ctx.dataDir, 'media')) || readdirSync(join(ctx.dataDir, 'media')).filter((n: string) => /^[a-f0-9]{20}$/.test(n)).length === 0);
+
+  /**
+   * **反向验证**：正常口播不该报警。
+   * 用手写的台词文件（4.7 字/秒，接近 BV14oa961ELQ 的真实密度）跑一次 textOnly，
+   * 那里不出图、但台词密度判据照样生效。
+   */
+  {
+    const tdir = join(ctx.dataDir, 'worlds', 'video-reader', 'transcripts');
+    const tf = join(tdir, 'dense.json');
+    writeFileSync(tf, JSON.stringify({
+      body: Array.from({ length: 60 }, (_, i) => ({
+        from: i * 0.6, to: (i + 1) * 0.6,
+        content: '这是一句正常人说的话内容大概八个字左',
+      })),
+    }), 'utf8');
+    const r: any = await handlers.get('video_storyboard')({ video: fixture, transcriptFile: tf, textOnly: true }, {});
+    check('高密度台词不报密度警告', !/台词密度\]/.test(r.text),
+      (r.text.split('\n').find((l: string) => /台词密度\]/.test(l)) ?? '（没有这一行 ✓）').slice(0, 80));
+  }
 
   console.log('\n4) textOnly（不算额度、不出图）');
   const textOnly: any = await handlers.get('video_storyboard')({ video: fixture, textOnly: true }, {});
